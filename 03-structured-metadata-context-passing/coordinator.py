@@ -22,11 +22,8 @@ Requirements the exam checks:
 """
 
 from __future__ import annotations
-
 import asyncio
-
 from claude_agent_sdk import ClaudeAgentOptions, query
-
 from subagent_defs import SUBAGENTS
 
 COORDINATOR_SYSTEM = """
