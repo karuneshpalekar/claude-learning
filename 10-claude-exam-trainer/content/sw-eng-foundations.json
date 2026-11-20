@@ -1,0 +1,691 @@
+{
+ "slug": "sw-eng-foundations",
+ "title": "SW Eng Foundations",
+ "overview": "This objective covers the engineering practices around building with Claude: using Claude Code well (explore-plan-code, verification and tests, CLAUDE.md, git and worktrees, headless runs), calling the API through the Python and TypeScript SDKs, and making those calls robust with typed error handling, retries and idempotent side effects. It also covers testing LLM applications with evals, getting code reviewed by Claude, and scaling Claude Code to large codebases. The exam favors scenario questions that ask which mechanism is deterministic versus advisory, which error is retryable, and how to scope context.",
+ "sources": [
+  {
+   "title": "Best practices for Claude Code",
+   "url": "https://code.claude.com/docs/en/best-practices"
+  },
+  {
+   "title": "Common workflows",
+   "url": "https://code.claude.com/docs/en/common-workflows"
+  },
+  {
+   "title": "Set up Claude Code in a monorepo or large codebase",
+   "url": "https://code.claude.com/docs/en/large-codebases"
+  },
+  {
+   "title": "Review locally with /code-review",
+   "url": "https://code.claude.com/docs/en/code-review-local"
+  },
+  {
+   "title": "Code Review (managed)",
+   "url": "https://code.claude.com/docs/en/code-review"
+  },
+  {
+   "title": "Claude API errors",
+   "url": "https://platform.claude.com/docs/en/api/errors"
+  },
+  {
+   "title": "Rate limits",
+   "url": "https://platform.claude.com/docs/en/api/rate-limits"
+  },
+  {
+   "title": "Python SDK",
+   "url": "https://platform.claude.com/docs/en/cli-sdks-libraries/sdks/python"
+  },
+  {
+   "title": "TypeScript SDK",
+   "url": "https://platform.claude.com/docs/en/cli-sdks-libraries/sdks/typescript"
+  },
+  {
+   "title": "Batch processing",
+   "url": "https://platform.claude.com/docs/en/build-with-claude/batch-processing"
+  },
+  {
+   "title": "Create strong empirical evaluations",
+   "url": "https://platform.claude.com/docs/en/test-and-evaluate/develop-tests"
+  },
+  {
+   "title": "Demystifying evals for AI agents",
+   "url": "https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents"
+  }
+ ],
+ "sections": [
+  {
+   "heading": "Explore, plan, code: the Claude Code workflow",
+   "notes": [
+    "Claude Code reads your repo itself, so the highest-value input is what it **cannot see**: team decisions, deploy steps, required env vars, and what 'done' means.",
+    "**Plan mode** (`claude --permission-mode plan`, or `Shift+Tab` until the status bar shows plan mode) lets Claude read files and propose a plan with no edits until you approve.",
+    "Delegate wide exploration to a **subagent** (for example the built-in Explore agent) so file reads stay out of your main conversation and only findings come back.",
+    "For vague requirements, ask Claude to **interview you** and write a `SPEC.md`; then start a **fresh session** to build from the spec so it begins with clean context and a written definition of done.",
+    "A specific prompt names the file, the symptom, and what 'fixed' looks like. If you want a fuller build than the minimum, say so (the docs mention `be ambitious`) since scope is something only you know.",
+    "Steering controls: `Esc` stops mid-action and keeps work; `/rewind` (or `Esc` twice) rolls back code and/or conversation; `/clear` starts over. After two failed corrections, `/clear` and write a better prompt instead of a third correction."
+   ],
+   "example": {
+    "title": "Vague vs specific prompts (from the best-practices page)",
+    "language": "text",
+    "code": "Instead of: fix the login bug\nTry: users report login fails after the session times out. look at token refresh in src/auth/, write a failing test that reproduces it, then fix it\n\nInterview-first:\nI want to add rate limiting to the public API but haven't thought it through yet. Interview me until you could write the spec, then write it to SPEC.md."
+   },
+   "examTips": [
+    "Plan mode = no edits until approval; it is the answer when a scenario says 'review changes before they touch disk'.",
+    "Checkpoints/`/rewind` cover files edited by Claude's own file tools, NOT files changed only via Bash commands; they complement git, not replace it.",
+    "Phrases like `think hard` are ordinary prompt text; the real control for reasoning depth is the **effort level** (`/effort`), with `ultrathink` for a single turn.",
+    "Subagents cost extra tokens and give parallelism or an independent reviewer, not a smarter answer to the same task."
+   ],
+   "source": "https://code.claude.com/docs/en/best-practices"
+  },
+  {
+   "heading": "Verification, tests and TDD: give Claude a check to run",
+   "notes": [
+    "Claude stops when work *looks* done. Give it something that returns pass/fail (test file, build exit code, linter, fixture diff, screenshot vs mockup) and it can loop: change, run, read output, fix.",
+    "The most useful line in `CLAUDE.md` is usually the exact command that runs the check, including how to run a single test file.",
+    "Strictness ladder: (1) ask in the prompt ('keep going until the auth tests pass'); (2) `/goal <condition>` which a separate model checks after every turn; (3) a **`Stop` hook** that exits 2 to force Claude back to work (harness-enforced); (4) an independent review via `/code-review` in a fresh subagent.",
+    "A failing-test-first prompt is the TDD pattern the docs model: write a failing test that reproduces the bug, then fix it.",
+    "Ask for **evidence** (the command and its output), not just 'all tests pass'. `/verify` has Claude build and run the app to catch what tests and typechecks miss.",
+    "A `Stop` hook that blocks 8 stops in a row with no tool call between them is overridden and the turn ends; raise the cap with `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP`."
+   ],
+   "example": {
+    "title": "Stop hook that enforces a passing typecheck (.claude/settings.json)",
+    "language": "json",
+    "code": "{\n  \"hooks\": {\n    \"Stop\": [\n      {\n        \"hooks\": [\n          { \"type\": \"command\", \"command\": \"pnpm tsc --noEmit 1>&2 || exit 2\" }\n        ]\n      }\n    ]\n  }\n}"
+   },
+   "examTips": [
+    "Exit code 2 is what blocks the stop; stderr is fed back to Claude as the reason. Hence the `1>&2` redirect.",
+    "A line in CLAUDE.md like 'always typecheck' works most of the time; only a hook/CI makes it guaranteed.",
+    "`prompt` and `agent` hooks ask another model to decide, so they are NOT deterministic; use `command`/`http` hooks (plus `onFailure: \"block\"` if a crashing hook should block the action).",
+    "When reviewing against a spec, tell the reviewer to skip style; a reviewer asked to find problems will always find something."
+   ],
+   "source": "https://code.claude.com/docs/en/best-practices"
+  },
+  {
+   "heading": "CLAUDE.md, rules and skills: what to write down",
+   "notes": [
+    "`CLAUDE.md` loads into every session, so every line costs attention on every task. Keep it short and include only what Claude can't work out from code.",
+    "Good contents: exact test/typecheck/lint commands, misleading spots in the code, decisions not in the repo, and anything you've corrected twice. Docs recommend staying under about 200 lines.",
+    "Don't describe architecture or file layout; Claude reads the repo. Don't pile on IMPORTANT/ALL CAPS: current models follow plain wording and emphasis causes over-application.",
+    "`/init` drafts a starting CLAUDE.md; `/doctor` suggests cuts; `/doctor prompt-audit` flags stale or contradictory instructions; `/context all` confirms what loaded.",
+    "Personal preferences go in `CLAUDE.local.md` (gitignored). Path-scoped rules live in `.claude/rules/*.md` with a `paths:` frontmatter filter.",
+    "Team procedures (release, runbook) go in **skills** at `.claude/skills/<name>/SKILL.md`. Only the name/description are always in context; the body loads when needed. `disable-model-invocation: true` makes a side-effecting skill user-only."
+   ],
+   "example": {
+    "title": "A CLAUDE.md that passes the 'can't find it by reading code' test",
+    "language": "text",
+    "code": "# Commands\n- Install: pnpm install\n- Run one test file: pnpm vitest run path/to/file.test.ts\n- Typecheck: pnpm tsc --noEmit\n\n# Conventions\n- Use the error helpers in src/lib/errors.ts, never throw raw strings\n- src/legacy/ is still live but don't copy its patterns into new code\n\n# Gotchas\n- Integration tests need DATABASE_URL set, see .env.example"
+   },
+   "examTips": [
+    "Decision rule: guideline with exceptions -> CLAUDE.md; rule with zero exceptions -> hook, deny rule, or managed setting.",
+    "If Claude keeps ignoring a CLAUDE.md line, either the file is too long or the line should be a hook; adding IMPORTANT is not the fix.",
+    "Long, rarely needed procedures belong in a skill, not CLAUDE.md, because skills are lighter on context."
+   ],
+   "source": "https://code.claude.com/docs/en/best-practices"
+  },
+  {
+   "heading": "Deterministic enforcement: hooks, permissions, sandbox",
+   "notes": [
+    "Every instruction is either **non-deterministic** (prompt, CLAUDE.md, skills: Claude decides) or **deterministic** (hooks, deny rules, managed settings: the harness enforces).",
+    "`PostToolUse` hook with matcher `Edit|Write` can run a formatter after every edit. A `PreToolUse` hook exiting 2 can block edits to protected paths such as `migrations/`.",
+    "`permissions.deny` rules hold in every mode, including auto and `bypassPermissions`; `ask` prompts; `allow` pre-approves. A `Read` deny rule also catches common file-reading commands like `cat .env`, but not a script that opens the file itself.",
+    "The **sandbox** (`/sandbox`) gives OS-level filesystem/network confinement; use it together with deny rules for anything security-related.",
+    "Scope: `.claude/settings.local.json` and `~/.claude/settings.json` are personal; `.claude/settings.json` is committed and shared; **managed settings** are org policy that no personal file can override.",
+    "Auto mode is a classifier model judging actions, so 'never' rules belong in deny rules or hooks, not in the conversation. Deny and ask rules and PreToolUse hooks run before the classifier."
+   ],
+   "example": {
+    "title": "Deny and ask rules (.claude/settings.json)",
+    "language": "json",
+    "code": "{\n  \"permissions\": {\n    \"allow\": [\"Bash(pnpm tsc --noEmit)\"],\n    \"ask\": [\"Bash(git push *)\"],\n    \"deny\": [\"Read(./.env)\", \"Read(./.env.local)\", \"Read(./secrets/**)\"]\n  }\n}"
+   },
+   "examTips": [
+    "A `WebFetch` domain deny does not stop `curl` to that domain unless the sandbox is on.",
+    "Keep the enforced set small; a hook for a mere preference (like 'prefer named exports') is over-engineering.",
+    "'Don't push until I've reviewed' said in chat is a soft signal that can be lost on compaction; a deny/ask rule is the reliable form."
+   ],
+   "source": "https://code.claude.com/docs/en/best-practices"
+  },
+  {
+   "heading": "Git workflows and parallel sessions",
+   "notes": [
+    "Ask directly: 'create a pr for my changes'. Claude can use `gh` (or `glab`) to open PRs and read review comments; sessions created this way are linked so `claude --from-pr 1234` finds them.",
+    "Review Claude's generated PR before submitting and ask it to highlight risks.",
+    "`claude --worktree <name>` (or `-w`) starts a session in a new **git worktree**: a separate checkout on its own branch so parallel sessions' edits don't collide. The repo needs at least one commit.",
+    "A worktree is a fresh checkout: gitignored files like `.env` are missing. List them in `.worktreeinclude` (small files only, copied) or use `worktree.symlinkDirectories` for big directories such as `node_modules`.",
+    "Resume work with `claude --continue` (most recent session in this directory), `claude --resume`, or `/rename` then `claude --resume <name>`.",
+    "`/batch <mechanical change>` splits a large change into 5 to 30 units, shows a plan, then gives each unit its own worktree and PR. A second session reviewing the first session's diff is the cheapest independent reviewer."
+   ],
+   "example": {
+    "title": "Parallel and scripted git-related commands",
+    "language": "bash",
+    "code": "claude --worktree feature-auth          # isolated checkout + branch\nclaude --continue                        # resume latest session here\nclaude --from-pr 1234                    # sessions linked to a PR\ngit log --oneline -20 | claude -p \"summarize these recent commits\""
+   },
+   "examTips": [
+    "Worktrees isolate files, not the model: cost still scales with number of sessions.",
+    "`claude -p --worktree` exits without asking, so you must clean up with `git worktree remove <path>` (and `git worktree unlock` if locked).",
+    "For overnight/unattended runs a protected `main` branch rule and a human merge approval are the final control."
+   ],
+   "source": "https://code.claude.com/docs/en/common-workflows"
+  },
+  {
+   "heading": "Running Claude Code headless and unattended",
+   "notes": [
+    "`claude -p \"prompt\"` runs once and exits; it is how Claude Code is used in CI, git hooks and shell loops.",
+    "Useful flags: `--bare` (skip hooks, skills, plugins, MCP, CLAUDE.md for reproducible runs; auth only via API key/helper/cloud creds), `--allowedTools`, `--permission-mode dontAsk` (refuse anything not pre-approved), `--output-format json|stream-json`, `--max-turns`, `--max-budget-usd`.",
+    "Five questions before leaving a run alone: does it know what done looks like, can it check its own work, what may it touch, what stops it (turn/spend cap), and who signs off on the result?",
+    "Start runs on a schedule or event: `/loop` (inside a session), `/schedule` (cloud scheduled tasks, needs claude.ai login), desktop scheduled tasks, or GitHub Actions.",
+    "Try a batch script on three files first, read what goes wrong, fix the prompt, then run the rest."
+   ],
+   "example": {
+    "title": "Bounded batch migration loop (from the docs)",
+    "language": "bash",
+    "code": "for file in $(cat files.txt); do\n  claude --bare -p \"Migrate $file to the new logger API and commit. Reply OK or FAIL.\" \\\n    --allowedTools \"Read,Edit,Bash(git add *),Bash(git commit *)\" \\\n    --permission-mode dontAsk \\\n    --max-turns 20\ndone"
+   },
+   "examTips": [
+    "Hooks passed with `--settings` do not run under `--bare`; do not use `--bare` for a run that needs them.",
+    "`--max-turns` and `--max-budget-usd` are deterministic caps; 'tell Claude not to spend too much' is not.",
+    "Prefer `dontAsk` + `--allowedTools` for CI; `bypassPermissions` only in a disposable container."
+   ],
+   "source": "https://code.claude.com/docs/en/best-practices"
+  },
+  {
+   "heading": "SDK usage in Python and TypeScript",
+   "notes": [
+    "Install: `pip install anthropic` (Python 3.10+) or `npm install @anthropic-ai/sdk` (TypeScript 5+, Node 20 LTS+). The client reads `ANTHROPIC_API_KEY` from the environment by default.",
+    "Core call: `client.messages.create(model=..., max_tokens=..., messages=[...])`. Response `content` is a list of blocks; check `block.type == \"text\"` before reading `.text`.",
+    "Python has sync `Anthropic` and async `AsyncAnthropic` (optionally with the `aiohttp` extra). TypeScript is promise-based. Both expose `messages.stream(...)` helpers and `create(..., stream=True)` for raw events.",
+    "Tool helpers: Python `@beta_tool` + `client.beta.messages.tool_runner(...)`; TypeScript `betaZodTool` + `client.beta.messages.toolRunner(...)`. The runner loops, calling your functions and returning results until Claude is done.",
+    "`message.usage` shows token counts; `client.messages.count_tokens(...)` counts before sending. Message Batches live under `client.messages.batches`.",
+    "Never put the API key in browser code: TypeScript blocks browsers unless `dangerouslyAllowBrowser: true`, and orgs with ZDR/Compliance API get a 401 on browser-origin requests.",
+    "The SDK sends `anthropic-version` for you; a new API version comes by upgrading to a new SDK major version."
+   ],
+   "example": {
+    "title": "Minimal Python and TypeScript calls",
+    "language": "python",
+    "code": "# Python\nimport os\nfrom anthropic import Anthropic\n\nclient = Anthropic(api_key=os.environ.get(\"ANTHROPIC_API_KEY\"))\nmessage = client.messages.create(\n    max_tokens=1024,\n    messages=[{\"role\": \"user\", \"content\": \"Hello, Claude\"}],\n    model=\"claude-opus-5-5\",\n)\nfor block in message.content:\n    if block.type == \"text\":\n        print(block.text)\n\n# TypeScript equivalent\n# const client = new Anthropic();\n# const message = await client.messages.create({\n#   max_tokens: 1024,\n#   messages: [{ role: \"user\", content: \"Hello, Claude\" }],\n#   model: \"claude-opus-5-5\",\n# });"
+   },
+   "examTips": [
+    "`create(stream=True)` returns raw events and uses less memory; `messages.stream()` also accumulates a final message (`get_final_message()` / `finalMessage()`).",
+    "Don't assume `content[0]` is text; with tools or thinking there are other block types.",
+    "In TypeScript, throw `ToolError` from a tool's `run` to report an error back to the model (it can carry content blocks); a plain `Error` becomes a text block."
+   ],
+   "source": "https://platform.claude.com/docs/en/cli-sdks-libraries/sdks/python"
+  },
+  {
+   "heading": "Error handling, retries and timeouts",
+   "notes": [
+    "HTTP errors: 400 `invalid_request_error`, 401 `authentication_error`, 402 `billing_error`, 403 `permission_error`, 404 `not_found_error`, 409 `conflict_error`, 413 `request_too_large`, 429 `rate_limit_error`, 500 `api_error`, 504 `timeout_error`, 529 `overloaded_error`.",
+    "Error body is JSON: `{type:'error', error:{type,message}, request_id}`. Every response also has a `request-id` header; log it and give it to support. SDKs expose `_request_id` on response objects.",
+    "SDKs retry **twice by default** with short exponential backoff, honoring `retry-after`. Retried: connection errors, 408, 409, 429, and >=500. Tune with `max_retries` (Python) / `maxRetries` (TS), globally or per request via `with_options`.",
+    "SDK exception hierarchy (Python and TS names align): `BadRequestError`(400), `AuthenticationError`(401), `PermissionDeniedError`(403), `NotFoundError`(404), `ConflictError`(409), `UnprocessableEntityError`(422), `RateLimitError`(429), `InternalServerError`(>=500), `APIConnectionError`. Catch the most specific first; do not string-match messages.",
+    "Default timeout is 10 minutes. Timeouts raise `APITimeoutError` (Python) / `APIConnectionTimeoutError` (TS) and are themselves retried. Large non-streaming `max_tokens` can trip an SDK error because requests expected to exceed ~10 minutes should **stream** (or use batches).",
+    "A spend-cap 429 (`error.details.error_code == enforced_spend_limit_reached`) has no `retry-after`, and retrying (including SDK auto-retries) fails until access resumes. A self-set spend limit returns **400**, not 429.",
+    "Streaming can fail **after** a 200 status: mid-stream errors arrive as SSE error events and need their own handling.",
+    "Rate limits are RPM, ITPM, OTPM per model class, enforced with a **token bucket** (continuously replenished). Only uncached input tokens count toward ITPM (`cache_read_input_tokens` don't). Ramp traffic gradually to avoid acceleration-limit 429s."
+   ],
+   "example": {
+    "title": "Typed error handling with explicit retry config",
+    "language": "python",
+    "code": "import anthropic\n\nclient = anthropic.Anthropic(max_retries=3, timeout=60.0)\n\ntry:\n    message = client.messages.create(\n        max_tokens=1024,\n        messages=[{\"role\": \"user\", \"content\": \"Hello, Claude\"}],\n        model=\"claude-opus-5-5\",\n    )\n    print(message._request_id)\nexcept anthropic.RateLimitError as e:\n    # SDK already retried; honor retry-after or shed load\n    print(\"429\", e.response.headers.get(\"retry-after\"))\nexcept anthropic.APIConnectionError as e:\n    print(\"network\", e.__cause__)\nexcept anthropic.APIStatusError as e:\n    print(e.status_code, e.response.headers.get(\"request-id\"))"
+   },
+   "examTips": [
+    "Do not blindly retry 4xx (400/401/403/404/413): they will not succeed unchanged. 429, 5xx, 529, connection errors and timeouts are the transient class.",
+    "Layering your own retries on top of SDK retries multiplies attempts (2 SDK retries x N of yours); set `max_retries` deliberately.",
+    "Catch order matters: `RateLimitError` and other subclasses before the generic `APIStatusError`."
+   ],
+   "source": "https://platform.claude.com/docs/en/api/errors"
+  },
+  {
+   "heading": "Idempotency and safe retries",
+   "notes": [
+    "A retry resends the same request, and a model call is not guaranteed to produce the same text twice. Design so that **repeating an operation is harmless**.",
+    "The error/SDK docs I read describe retries and backoff but do not document an idempotency-key header for the Messages API, so duplicate suppression is the application's job (treat this as a design point, not a documented API feature).",
+    "Make the **side effects** idempotent, not the model call: use your own deterministic dedupe key (such as a job ID) in your database, upsert instead of insert, and record completion before acting on results.",
+    "For bulk work, the **Message Batches API** gives a built-in correlation handle: each request has a unique `custom_id` (1-64 chars, `^[a-zA-Z0-9_-]{1,64}$`). Results can come back in **any order**, so always match by `custom_id`.",
+    "Batch result types: `succeeded`, `errored`, `canceled`, `expired`. Errored, canceled and expired requests are not billed. Retry only the non-succeeded `custom_id`s in a new batch.",
+    "Batch facts: up to 100,000 requests or 256 MB per batch, most finish within 1 hour, expire at 24 hours, results downloadable for 29 days, 50 percent of standard price.",
+    "For tool-using agents, the tools you expose perform the real side effects: make write tools idempotent (check-then-write or keyed upserts) because a retried or resumed loop may call them again."
+   ],
+   "example": {
+    "title": "Retry only what failed in a batch, matched by custom_id",
+    "language": "python",
+    "code": "failed_ids = []\nfor entry in client.messages.batches.results(batch_id):\n    if entry.result.type == \"succeeded\":\n        save_once(entry.custom_id, entry.result.message)   # upsert keyed by custom_id\n    else:  # errored | canceled | expired\n        failed_ids.append(entry.custom_id)\n\n# resubmit only failed_ids in a new batch with the same custom_ids\nretry_requests = [req for req in original_requests if req[\"custom_id\"] in set(failed_ids)]"
+   },
+   "examTips": [
+    "Never rely on result ordering in batches; the docs explicitly warn it may not match input order.",
+    "Exponential backoff protects the API; idempotency protects YOUR data. They solve different problems and a robust system needs both.",
+    "Expired requests mean the 24h window passed before they ran: resubmit, possibly in smaller batches."
+   ],
+   "source": "https://platform.claude.com/docs/en/build-with-claude/batch-processing"
+  },
+  {
+   "heading": "Testing LLM applications and evals",
+   "notes": [
+    "Start from **success criteria** that are specific, measurable, achievable and relevant (for example 'F1 of 0.85 on sentiment', 'under 0.1% of 10,000 outputs flagged'). Common axes: task fidelity, consistency, relevance, tone, privacy, context use, latency, cost.",
+    "Design principles: be task-specific (mirror real traffic and include edge cases like malformed, overlong, ambiguous or harmful input); automate grading where possible; prefer **volume over quality** (many auto-graded cases beat a few hand-graded ones).",
+    "Grading methods: **code-based** (exact match, string match, embedding similarity, ROUGE-L) is fast and reproducible; **LLM-based** (Likert scale or binary yes/no with a rubric) handles nuance; **human** is the gold standard but slow and costly. Docs recommend a different model for grading than the one that generated the output.",
+    "For agents: a **task** is one test with success criteria; a **trial** is one attempt (run several because outputs vary). Grade the **outcome**, not a rigid step sequence, and give partial credit where it makes sense.",
+    "**pass@k** = chance of at least one success in k tries (rises with k; fine when one good result is enough). **pass^k** = chance all k succeed (falls with k; right for customer-facing reliability).",
+    "**Capability evals** start at a low pass rate and measure what you can't do yet; **regression evals** should sit near 100% and guard existing behavior. Promote saturated capability evals to regression suites.",
+    "Practical roadmap: begin with about 20-50 tasks from real failures; unambiguous tasks with reference solutions; **balanced** sets (cases where behavior should AND should not occur); stable harness with **isolated** trials; calibrate model graders against humans; read transcripts before trusting scores; watch for saturation; assign owners.",
+    "Workflow: define criteria, build test set with edge cases, choose grader, run, measure, refine, then final validation before shipping. Message Batches (50 percent cost) suit large offline eval runs."
+   ],
+   "example": {
+    "title": "Code-based exact-match grader and LLM-based Likert grader",
+    "language": "python",
+    "code": "def evaluate_exact_match(model_output, correct_answer):\n    return model_output.strip().lower() == correct_answer.lower()\n\naccuracy = sum(\n    evaluate_exact_match(out, tweet[\"sentiment\"])\n    for out, tweet in zip(outputs, tweets)\n) / len(tweets)\n\ntone_prompt = f\"\"\"Rate this customer service response on a scale of 1-5 for being {target_tone}:\n<response>{model_output}</response>\n1: Not at all {target_tone}\n5: Perfectly {target_tone}\nOutput only the number.\"\"\""
+   },
+   "examTips": [
+    "Pick the grader by task: categorical label -> exact match; summary similarity -> ROUGE/embeddings; tone/empathy -> LLM Likert; yes/no policy checks (e.g. contains PHI) -> LLM binary.",
+    "Testing only cases where a behavior should fire causes over-triggering (class imbalance); always include negative cases.",
+    "A grader model needs calibration against human judgment and can be gamed; a surprising score may be a grading bug, so read the transcript.",
+    "Isolation: shared state between trials causes correlated failures or inflated scores."
+   ],
+   "source": "https://platform.claude.com/docs/en/test-and-evaluate/develop-tests"
+  },
+  {
+   "heading": "Code review with Claude",
+   "notes": [
+    "Four options: managed **Code Review** (GitHub PRs, Team/Enterprise, runs on Anthropic infrastructure); local **`/code-review`** (any plan); **ultrareview** (deep multi-agent cloud review via `/code-review ultra`); or your own CI with GitHub Actions/GitLab CI or a custom reviewer subagent/skill.",
+    "Managed Code Review pipeline: **Find** (several agents in parallel) then **Verify** (drops false positives) then **Rank** (dedupe and severity) then **Post** (inline comments, summary, and a check run named Claude Code Review). It reads the diff and surrounding code and does **not** build or run your code, and repository access is read-only.",
+    "It **never approves or blocks** a PR and its check run never concludes as a failure; merge decisions stay with humans. Triggers per repo: once at PR open, after every push, or on request; anyone with write access can comment `@claude review`. Drafts and fork PRs are skipped by automatic reviews.",
+    "Customize managed review with `REVIEW.md` (read from the **base/default branch**, never from the PR's own changes) and `CLAUDE.md`. Review levels: Quick, Standard (default), Deep. Not available with ZDR or HIPAA configuration.",
+    "Local `/code-review` targets: none (current branch plus uncommitted), a PR number, a branch range like `main...my-feature`, a commit range, or a path. Flags: `--fix` (apply findings, via your permission mode), `--comment` (post to the PR/MR), `--max-findings`. It follows **CLAUDE.md**, not REVIEW.md.",
+    "Effort level before the target trades coverage for confidence: `low` reports only high-confidence findings (fewer false positives); `medium` to `max` broaden coverage. The terminal review runs in a background forked subagent with its own context.",
+    "Best-practice pattern: an independent reviewer that did not write the code (fresh subagent or second session) beats self-review; for spec compliance use a custom prompt that checks requirements and edge-case tests and says 'skip style'."
+   ],
+   "example": {
+    "title": "Local review commands",
+    "language": "text",
+    "code": "/code-review                       # current branch + uncommitted changes\n/code-review high 1234 --comment   # high effort, PR 1234, post inline comments\n/code-review main...my-feature     # range\n/code-review --fix src/auth        # review a path, then apply findings\n\n# custom spec reviewer prompt\nuse a subagent to review the rate limiter diff against SPEC.md, check every requirement is implemented and the listed edge cases have tests, report gaps that affect correctness and skip style"
+   },
+   "examTips": [
+    "`REVIEW.md` configures only the managed GitHub service; local `/code-review` reads CLAUDE.md.",
+    "Managed Code Review is advisory (no approve/block); branch protection and human approval are the enforcement.",
+    "Background `--fix` edits are outside session checkpoints, so `/rewind` won't undo them; use git.",
+    "A reviewer subagent given only `tools: Read, Grep, Glob` cannot edit, enforced by Claude Code rather than by prompt."
+   ],
+   "source": "https://code.claude.com/docs/en/code-review"
+  },
+  {
+   "heading": "Working with large codebases and monorepos",
+   "notes": [
+    "Defaults tuned for small projects can fill context with unrelated instructions and file reads in a big repo. Scope Claude to the part of the tree a task touches.",
+    "**Where you start `claude` matters**: from the repo root it can touch every file and loads the root CLAUDE.md (subdirectory files load on demand); from a subdirectory it loads that directory's and every ancestor's CLAUDE.md and has access to that subtree only. Project `.claude/settings.json` is NOT inherited from parent directories.",
+    "Layer CLAUDE.md: root file for repo-wide rules, per-package/subsystem files for local conventions, committed and owned by that area. Alternative: `.claude/rules/` with `paths:` globs (central, loads when matching files are touched).",
+    "`claudeMdExcludes` (glob on absolute paths, start with `**/`) skips CLAUDE.md/rules for packages you never touch; arrays merge across scopes. `Read` deny rules (e.g. `Read(./**/dist/**/*)`) block generated/vendored code; `.gitignore`d paths are already skipped by searches.",
+    "**Code intelligence plugins** (language-server based, e.g. `/plugin install typescript-lsp@claude-plugins-official`) let Claude jump to definitions and references instead of scanning many files.",
+    "`worktree.sparsePaths` checks out only listed directories (plus root-level files; include `.claude` if needed) and `worktree.symlinkDirectories` avoids copying `node_modules`. `additionalDirectories` / `--add-dir` grants access to sibling packages; only `--add-dir` can load their skills, and CLAUDE.md only with `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`.",
+    "Per-directory **skills** load on demand and keep context small; keep descriptions short and keyword-first. For cross-cutting change, give one session the whole change and **plan first**: plan mode writes a plan file that is re-injected after each compaction.",
+    "Move conventions out of always-loaded CLAUDE.md into skills, plugins (versioned, installable org-wide via managed settings), or MCP tools wrapping an existing code-search index when layering stops scaling. Delegate exploration to subagents and use `/clear` between unrelated tasks."
+   ],
+   "example": {
+    "title": "Per-area settings for packages/api (from the docs)",
+    "language": "json",
+    "code": "{\n  \"worktree\": {\n    \"sparsePaths\": [\".claude\", \"packages/api\", \"packages/shared\"],\n    \"symlinkDirectories\": [\"node_modules\"]\n  },\n  \"permissions\": {\n    \"additionalDirectories\": [\"../shared\"],\n    \"deny\": [\"Read(./**/dist/**/*)\", \"Read(./**/build/**/*)\"]\n  }\n}"
+   },
+   "examTips": [
+    "`additionalDirectories` in settings never loads the added directory's CLAUDE.md or skills; `--add-dir` loads skills.",
+    "Inside a worktree the working directory is the worktree root, so settings (deny rules, hooks) must be in the repo-root `.claude/settings.json` to apply there.",
+    "The `claudeMdExcludes` list is static: to change focus per task, start Claude from a different directory instead.",
+    "A managed (organization) CLAUDE.md cannot be excluded by `claudeMdExcludes`."
+   ],
+   "source": "https://code.claude.com/docs/en/large-codebases"
+  },
+  {
+   "heading": "Controlling cost and context in long sessions",
+   "notes": [
+    "Every request resends the whole conversation, so a session holding three unrelated tasks pays for all three each turn. `/clear` between unrelated tasks is free and helps quality too.",
+    "`/compact <focus>` summarizes with guidance (for example keep API changes and test commands); it is itself a big request on long sessions. Auto-compaction happens before the window fills (most current models have a 1M-token window).",
+    "`/usage` breaks down spend by skill, subagent, plugin and MCP server. Prompt cache lasts about an hour on a subscription and five minutes on API key/cloud/credits; subagents default to five minutes.",
+    "Connected MCP servers add tool names and instructions to context even when unused; disable ones you don't need under `/mcp`.",
+    "Pick effort by task: `low` for quick iteration, `high`/`xhigh` for subtle bugs and cross-cutting changes, `max` only for hard unattended problems (it can overthink); `ultrathink` for one turn.",
+    "Cheap subagents: set `model: haiku` for simple jobs, request short summaries back, and restrict tools."
+   ],
+   "example": {
+    "title": "Reviewer subagent with read-only tools (.claude/agents/reviewer.md)",
+    "language": "text",
+    "code": "---\nname: reviewer\ndescription: Reviews changed files against the spec they were built from. Use after implementing a feature, before opening the PR.\ntools: Read, Grep, Glob\n---\nYou're reviewing code you didn't write. Compare the changed files against the spec you're given,\ncheck that every requirement is implemented and the listed edge cases have tests,\nand report only the gaps that affect correctness. Skip style."
+   },
+   "examTips": [
+    "Subagents buy parallelism, noisy-output isolation, and an unbiased reviewer; they cost tokens and don't improve the answer to the same task.",
+    "Context management advice that is now outdated: aggressive window micromanagement and 'keep going, don't be lazy' prompts; giving Claude a check to pass is still valuable."
+   ],
+   "source": "https://code.claude.com/docs/en/best-practices"
+  }
+ ],
+ "keyTakeaways": [
+  "Only write in CLAUDE.md what Claude can't find by reading the repo; keep it short (about 200 lines or fewer).",
+  "Zero-exception rules go in hooks, deny rules or managed settings; guidelines go in CLAUDE.md or skills.",
+  "Give Claude a pass/fail check; a Stop hook exiting 2 enforces it, and ask for evidence not assurances.",
+  "Plan mode reviews before edits; /clear after two failed corrections; /rewind does not cover Bash-only changes.",
+  "Use `claude --worktree` for parallel isolated sessions; `.worktreeinclude` brings gitignored files like .env.",
+  "Headless: `claude -p` with --allowedTools, --permission-mode dontAsk, --max-turns/--max-budget-usd, and a human approving the result.",
+  "SDKs retry connection errors, 408, 409, 429 and >=500 twice by default; configure with max_retries/maxRetries; default timeout 10 minutes.",
+  "Don't retry 400/401/403/404/413 unchanged; spend-cap 429 has no retry-after and won't succeed on retry; log request-id.",
+  "Stream (or batch) long generations; streaming errors can arrive after a 200 status.",
+  "Make side effects idempotent yourself; in Batches match results by custom_id because order is not preserved.",
+  "Evals: specific measurable criteria, task-specific edge cases, automate, volume over hand-graded quality; exact match for labels, LLM grader for tone, calibrate against humans.",
+  "pass@k vs pass^k; capability vs regression evals; balance positive and negative cases; isolate trials.",
+  "Managed Code Review is advisory and read-only (REVIEW.md from base branch); local /code-review follows CLAUDE.md.",
+  "Large repos: start from the right directory, layer CLAUDE.md, claudeMdExcludes, Read deny rules, code intelligence plugins, sparse worktrees, plan first."
+ ],
+ "glossary": [
+  {
+   "term": "Plan mode",
+   "definition": "Permission mode where Claude reads and proposes a plan but makes no edits until you approve."
+  },
+  {
+   "term": "CLAUDE.md",
+   "definition": "Markdown instructions loaded into every Claude Code session; non-deterministic guidance for facts Claude can't infer from code."
+  },
+  {
+   "term": "Hook",
+   "definition": "Deterministic handler (command, HTTP, MCP tool, prompt/agent) the harness runs at lifecycle points such as PreToolUse, PostToolUse and Stop."
+  },
+  {
+   "term": "Stop hook",
+   "definition": "Hook run when Claude tries to end its turn; exit code 2 sends stderr back and keeps Claude working."
+  },
+  {
+   "term": "Deny rule",
+   "definition": "Permission rule that blocks an action in every permission mode, e.g. Read(./.env)."
+  },
+  {
+   "term": "Managed settings",
+   "definition": "Organization-level settings no personal or project file can override."
+  },
+  {
+   "term": "Skill",
+   "definition": "A SKILL.md procedure or knowledge pack loaded on demand; name and description are always visible to Claude."
+  },
+  {
+   "term": "Subagent",
+   "definition": "A Claude instance with its own context window and optionally restricted tools, used for parallel work, noisy output, or independent review."
+  },
+  {
+   "term": "Worktree",
+   "definition": "A separate git checkout on its own branch, used for isolated parallel sessions."
+  },
+  {
+   "term": "--bare",
+   "definition": "claude -p flag that skips hooks, skills, plugins, MCP and CLAUDE.md for reproducible scripted runs."
+  },
+  {
+   "term": "request-id",
+   "definition": "Unique per-response identifier (header and body request_id; SDK _request_id) for debugging and support."
+  },
+  {
+   "term": "APIStatusError",
+   "definition": "SDK base exception for non-success HTTP responses; specific subclasses map to 400, 401, 403, 404, 409, 422, 429, >=500."
+  },
+  {
+   "term": "Exponential backoff",
+   "definition": "Retry strategy that waits progressively longer between attempts; SDK default is 2 retries, honoring retry-after."
+  },
+  {
+   "term": "retry-after",
+   "definition": "Response header giving seconds to wait before retrying a 429; absent on spend-cap 429s."
+  },
+  {
+   "term": "Token bucket",
+   "definition": "Rate limiting algorithm where capacity replenishes continuously up to the maximum rather than resetting at fixed intervals."
+  },
+  {
+   "term": "Idempotency",
+   "definition": "Property that repeating an operation has the same effect as doing it once; needed for safe retries."
+  },
+  {
+   "term": "custom_id",
+   "definition": "Unique 1-64 char identifier on each Message Batches request used to match results, which may return in any order."
+  },
+  {
+   "term": "Message Batches API",
+   "definition": "Asynchronous bulk Messages processing at 50 percent price; up to 100,000 requests or 256 MB, 24 hour expiry."
+  },
+  {
+   "term": "Eval",
+   "definition": "A test giving an AI system an input and applying grading logic to its output."
+  },
+  {
+   "term": "Trial",
+   "definition": "One attempt at an eval task; multiple trials account for output variance."
+  },
+  {
+   "term": "pass@k / pass^k",
+   "definition": "Probability of at least one success in k trials versus all k succeeding."
+  },
+  {
+   "term": "Regression eval",
+   "definition": "Eval expected to stay near 100% that guards existing behavior."
+  },
+  {
+   "term": "Code Review (managed)",
+   "definition": "GitHub PR review service with find, verify, rank, post stages; advisory only, configured by REVIEW.md and CLAUDE.md."
+  },
+  {
+   "term": "claudeMdExcludes",
+   "definition": "Setting of glob patterns for CLAUDE.md/rules files that should never load."
+  },
+  {
+   "term": "Code intelligence plugin",
+   "definition": "Language-server-backed plugin giving go-to-definition and find-references to reduce file scanning."
+  }
+ ],
+ "quiz": [
+  {
+   "q": "Your team's CLAUDE.md has grown past 400 lines and Claude keeps skipping the line 'Never edit files in src/gen/' even after you prefixed it with IMPORTANT. What is the best fix?",
+   "options": [
+    "Add more emphasis such as ALL CAPS and repeat the line at the top and bottom",
+    "Move the rule into a PreToolUse hook or a deny rule so the harness enforces it",
+    "Ask Claude to read CLAUDE.md again at the start of every prompt",
+    "Switch to a smaller model so it pays attention to fewer lines"
+   ],
+   "answer": 1,
+   "explanation": "A rule with zero exceptions is deterministic territory: hooks, deny rules or managed settings. CLAUDE.md is non-deterministic guidance, and emphasis mostly makes models over-apply. Re-reading and model swaps do not guarantee compliance.",
+   "source": "https://code.claude.com/docs/en/best-practices"
+  },
+  {
+   "q": "You want Claude to implement a bugfix but review the plan before any file changes. Which approach fits?",
+   "options": [
+    "Start in plan mode (claude --permission-mode plan) and approve the plan before editing",
+    "Use --bare so hooks and CLAUDE.md are skipped",
+    "Run /compact before the request",
+    "Use bypassPermissions so Claude moves faster"
+   ],
+   "answer": 0,
+   "explanation": "Plan mode lets Claude read and propose with no edits until approval. --bare is for reproducible scripted runs; /compact summarizes context; bypassPermissions removes guardrails.",
+   "source": "https://code.claude.com/docs/en/common-workflows"
+  },
+  {
+   "q": "A nightly script uses claude -p to migrate files. You need it to never prompt, only use Read/Edit/git add/git commit, and stop after 20 agentic turns. Which flags do this?",
+   "options": [
+    "--permission-mode dontAsk --allowedTools \"Read,Edit,Bash(git add *),Bash(git commit *)\" --max-turns 20",
+    "--permission-mode bypassPermissions --effort max",
+    "--bare --worktree --max-budget-usd 0",
+    "--continue --resume --allowedTools '*'"
+   ],
+   "answer": 0,
+   "explanation": "dontAsk refuses anything not pre-approved, --allowedTools pre-approves the listed tools, and --max-turns caps the run. bypassPermissions approves everything not denied and is for disposable containers.",
+   "source": "https://code.claude.com/docs/en/best-practices"
+  },
+  {
+   "q": "You want a guarantee that Claude cannot finish a turn while `tsc --noEmit` fails. What is the correct mechanism?",
+   "options": [
+    "A CLAUDE.md line: 'Always typecheck before finishing'",
+    "A Stop hook running the typecheck and exiting with code 2 on failure, with output on stderr",
+    "A PostToolUse prompt hook asking another model if types look right",
+    "Asking for evidence in the prompt"
+   ],
+   "answer": 1,
+   "explanation": "A command-type Stop hook that exits 2 sends stderr back to Claude and blocks stopping (harness-enforced, up to the block cap). CLAUDE.md and prompts are advisory; a prompt hook uses a model and is not deterministic.",
+   "source": "https://code.claude.com/docs/en/best-practices"
+  },
+  {
+   "q": "Your Python service gets intermittent 529 overloaded_error and occasional 429s. You use the official SDK with defaults. What happens by default?",
+   "options": [
+    "Nothing is retried; every error is raised immediately",
+    "The SDK retries transient errors twice with exponential backoff, honoring retry-after when present",
+    "The SDK retries indefinitely until success",
+    "Only 4xx errors are retried"
+   ],
+   "answer": 1,
+   "explanation": "Official SDKs retry connection errors, 408, 409, 429 and 5xx twice by default with backoff and respect retry-after. max_retries tunes it; retries are not unlimited.",
+   "source": "https://platform.claude.com/docs/en/api/errors"
+  },
+  {
+   "q": "After deploying, 429 errors continue for hours and carry no retry-after header; the error body has details.error_code = enforced_spend_limit_reached. What is the right response?",
+   "options": [
+    "Increase max_retries to 10 so the SDK eventually succeeds",
+    "Recognize the tier spend cap: retrying fails until access resumes, so raise the limit or alert, do not loop",
+    "Switch to streaming",
+    "Reduce max_tokens"
+   ],
+   "answer": 1,
+   "explanation": "A spend-cap 429 has no retry-after and keeps failing, including SDK auto-retries, until access resumes (next month or a tier increase). It is distinguishable by error_code.",
+   "source": "https://platform.claude.com/docs/en/api/rate-limits"
+  },
+  {
+   "q": "A job calls Claude, then charges a customer based on the output. A network timeout causes your code (plus SDK) to retry. Which design best prevents a double charge?",
+   "options": [
+    "Rely on the SDK to deduplicate requests",
+    "Use a deterministic job key and make the charge an idempotent upsert keyed on it, recording completion before acting",
+    "Set max_retries=0 and never retry",
+    "Lower the temperature to 0 so output is identical"
+   ],
+   "answer": 1,
+   "explanation": "Idempotency is an application concern: the side effect must be safe to repeat. The docs describe retries but no idempotency-key for Messages; temperature 0 does not guarantee identical output, and disabling retries just hurts reliability.",
+   "source": "https://platform.claude.com/docs/en/api/errors"
+  },
+  {
+   "q": "You submitted 50,000 requests via Message Batches. Results are written to your DB in order of the results file position, and some rows are mismatched with inputs. What is the cause and fix?",
+   "options": [
+    "Batches always preserve order; the DB code is wrong in some other way",
+    "Results can return in any order; match each result to its input using custom_id",
+    "Results must be fetched one at a time",
+    "Use a larger batch to preserve order"
+   ],
+   "answer": 1,
+   "explanation": "Docs warn batch results may not match input order; custom_id (1-64 chars, alphanumeric, hyphen, underscore) is the correlation key.",
+   "source": "https://platform.claude.com/docs/en/build-with-claude/batch-processing"
+  },
+  {
+   "q": "In a batch, 3% of results are 'expired'. What should you do?",
+   "options": [
+    "Pay for them and ignore",
+    "They were not billed; resubmit those custom_ids in a new (possibly smaller) batch",
+    "Raise max_tokens",
+    "Fetch them again from the same batch after 29 days"
+   ],
+   "answer": 1,
+   "explanation": "Expired means the 24-hour window ended before they ran; they are not billed. Retry only non-succeeded custom_ids. Results availability (29 days) is about downloading, not rerunning.",
+   "source": "https://platform.claude.com/docs/en/build-with-claude/batch-processing"
+  },
+  {
+   "q": "You generate a very long report (max_tokens very high) with a non-streaming call and get timeouts or an SDK error about expected duration. Best fix?",
+   "options": [
+    "Increase max_retries only",
+    "Use the streaming Messages API (stream helpers such as get_final_message) or the Batches API",
+    "Switch to async client without streaming",
+    "Remove the timeout"
+   ],
+   "answer": 1,
+   "explanation": "Long non-streaming requests risk idle-connection drops; the SDK errors if a request is expected to exceed ~10 minutes. Streaming (with helper to get the final message) or Batches is the documented answer.",
+   "source": "https://platform.claude.com/docs/en/api/errors"
+  },
+  {
+   "q": "You are building an eval for a classifier that outputs one of five sentiment labels. Which grading method is the best first choice?",
+   "options": [
+    "Human grading of every output",
+    "LLM-based Likert scale grading",
+    "Code-based exact match after normalizing case and whitespace",
+    "ROUGE-L against a reference summary"
+   ],
+   "answer": 2,
+   "explanation": "Categorical outputs are best graded automatically with exact match: fast, cheap, reproducible. Human is slow; Likert suits subjective qualities; ROUGE-L suits summaries.",
+   "source": "https://platform.claude.com/docs/en/test-and-evaluate/develop-tests"
+  },
+  {
+   "q": "Your support agent must behave reliably in every conversation. Which metric aligns with that need?",
+   "options": [
+    "pass@k, since one success in k tries is enough",
+    "pass^k, the probability that all k trials succeed",
+    "Raw average latency",
+    "ROUGE-L"
+   ],
+   "answer": 1,
+   "explanation": "pass^k falls as k rises and measures consistency, which fits customer-facing agents; pass@k suits cases where one good attempt is enough.",
+   "source": "https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents"
+  },
+  {
+   "q": "An eval for 'agent should search the web' only contains queries that need search. After tuning, the agent searches for almost everything. What eval design flaw is this?",
+   "options": [
+    "Insufficient trial isolation",
+    "Class imbalance: no cases where the behavior should not occur",
+    "Using code-based graders",
+    "Too many trials"
+   ],
+   "answer": 1,
+   "explanation": "Balanced problem sets must include negative cases so over-triggering is visible, as the evals guidance explains.",
+   "source": "https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents"
+  },
+  {
+   "q": "Which statement about managed Code Review on GitHub is correct?",
+   "options": [
+    "It approves PRs that have no findings and blocks PRs with critical findings",
+    "It reviews read-only without running your code, never approves or blocks, and posts inline comments plus a check run",
+    "It reads REVIEW.md from the pull request's own branch",
+    "It is available on every plan including organizations with ZDR"
+   ],
+   "answer": 1,
+   "explanation": "Managed Code Review reads the diff and surrounding code, verifies findings, posts inline comments and a check run that never fails, and cannot approve/block. REVIEW.md comes from the base branch; ZDR orgs are excluded.",
+   "source": "https://code.claude.com/docs/en/code-review"
+  },
+  {
+   "q": "You run /code-review locally and want your project's review rules applied. Where do you put them?",
+   "options": [
+    "REVIEW.md in the repo root",
+    "CLAUDE.md",
+    "A .claude/review.json file",
+    "settings.json permissions.allow"
+   ],
+   "answer": 1,
+   "explanation": "Local /code-review follows CLAUDE.md (even in -p mode) and does not read REVIEW.md, which only configures the managed GitHub service.",
+   "source": "https://code.claude.com/docs/en/code-review-local"
+  },
+  {
+   "q": "In a monorepo, you launch Claude from packages/api/. Which is true?",
+   "options": [
+    "Only that package's CLAUDE.md loads; the root one is ignored",
+    "Root and packages/api CLAUDE.md load at launch; packages/web CLAUDE.md does not, and project .claude/settings.json is not inherited from parent directories",
+    "All CLAUDE.md files in the repo load at launch",
+    "Sibling package skills load automatically via additionalDirectories"
+   ],
+   "answer": 1,
+   "explanation": "Starting from a subdirectory loads that directory's and every ancestor's CLAUDE.md. Settings files are not inherited from parents, and additionalDirectories never loads skills or CLAUDE.md.",
+   "source": "https://code.claude.com/docs/en/large-codebases"
+  },
+  {
+   "q": "Searches in your large repo keep surfacing a committed vendored SDK and generated clients. What is the right control?",
+   "options": [
+    "Add them to CLAUDE.md as 'ignore these'",
+    "Add Read deny rules in permissions.deny for those paths (gitignored paths are already skipped by searches)",
+    "Use --bare",
+    "Delete .gitignore"
+   ],
+   "answer": 1,
+   "explanation": "For checked-in paths, Read deny rules block opening them; ignored paths are already excluded from searches. CLAUDE.md is advisory.",
+   "source": "https://code.claude.com/docs/en/large-codebases"
+  },
+  {
+   "q": "You start Claude in a new git worktree for a task, but the app fails because .env is missing. Best fix?",
+   "options": [
+    "Commit .env to the repo",
+    "List .env in a .worktreeinclude file at the repo root so Claude Code copies it into each new worktree",
+    "Disable worktrees",
+    "Use bypassPermissions"
+   ],
+   "answer": 1,
+   "explanation": "Worktrees are fresh checkouts without gitignored files. .worktreeinclude (gitignore syntax) copies small files; symlinkDirectories handles large directories.",
+   "source": "https://code.claude.com/docs/en/best-practices"
+  }
+ ]
+}

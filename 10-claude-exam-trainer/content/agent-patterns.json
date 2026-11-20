@@ -1,0 +1,476 @@
+{
+ "slug": "agent-patterns",
+ "title": "Agent Patterns",
+ "overview": "This objective covers Anthropic's guidance on building agentic systems: the augmented LLM building block, five workflow patterns (prompt chaining, routing, parallelization, orchestrator-workers, evaluator-optimizer), and autonomous agents. It also covers when each is appropriate and lessons from Anthropic's multi-agent research system. The exam tests choosing the simplest pattern that fits a scenario and understanding the cost and reliability trade-offs.",
+ "sources": [
+  {
+   "title": "Building effective agents",
+   "url": "https://www.anthropic.com/engineering/building-effective-agents"
+  },
+  {
+   "title": "How we built our multi-agent research system",
+   "url": "https://www.anthropic.com/engineering/multi-agent-research-system"
+  }
+ ],
+ "sections": [
+  {
+   "heading": "Workflows vs agents, and when to use either",
+   "notes": [
+    "Anthropic uses **agentic systems** as the umbrella term. **Workflows** orchestrate LLMs and tools through predefined code paths. **Agents** let the LLM dynamically direct its own process and tool use.",
+    "Start with the simplest solution and add complexity only when it demonstrably helps. Often that means a single LLM call optimized with retrieval and in-context examples.",
+    "Agentic systems trade latency and cost for better task performance. Workflows give predictability and consistency for well-defined tasks. Agents fit cases needing flexibility and model-driven decisions at scale."
+   ],
+   "examTips": [
+    "If a question describes a well-defined task with predictable steps, the answer is a workflow, not an autonomous agent.",
+    "'Most sophisticated' is never the right answer; 'simplest that meets the need' is."
+   ],
+   "source": "https://www.anthropic.com/engineering/building-effective-agents"
+  },
+  {
+   "heading": "Frameworks and the three core principles",
+   "notes": [
+    "Frameworks (Claude Agent SDK, Strands, Rivet, Vellum) simplify LLM calls, tool parsing and chaining, but add abstraction that can hide prompts and responses and make debugging harder.",
+    "Advice: begin by calling LLM APIs directly, and if you use a framework make sure you understand what it does underneath.",
+    "Three principles: **simplicity** of design, **transparency** by showing the agent's planning steps, and a carefully crafted **agent-computer interface (ACI)** via thorough tool documentation and testing."
+   ],
+   "examTips": [
+    "Memorize the three principles: simplicity, transparency, ACI.",
+    "Wrong assumptions about what a framework does under the hood are a named source of errors."
+   ],
+   "source": "https://www.anthropic.com/engineering/building-effective-agents"
+  },
+  {
+   "heading": "Building block: the augmented LLM",
+   "notes": [
+    "The foundation is an LLM enhanced with **retrieval, tools and memory**. The model generates its own search queries, selects tools and decides what information to retain.",
+    "Tailor augmentations to the use case and expose them through clear, well-documented interfaces. MCP is one way to integrate tools."
+   ],
+   "examTips": [
+    "Retrieval, tools, memory: the three augmentations. Every pattern below assumes each LLM call has them."
+   ],
+   "source": "https://www.anthropic.com/engineering/building-effective-agents",
+   "example": {
+    "title": "Augmented LLM as tool loop skeleton",
+    "language": "python",
+    "code": "# one augmented call: model + tools (+ retrieval/memory exposed as tools)\nresp = client.messages.create(\n    model=MODEL, max_tokens=1024,\n    tools=[search_tool, memory_tool],\n    messages=[{\"role\": \"user\", \"content\": task}],\n)\n# resp.content may contain tool_use blocks the model chose itself"
+   }
+  },
+  {
+   "heading": "Prompt chaining",
+   "notes": [
+    "A task is decomposed into sequential steps; each LLM call processes the previous output. Programmatic **gates** can validate intermediate results.",
+    "Use when the task cleanly splits into fixed subtasks. It trades latency for accuracy by making each call easier.",
+    "Examples: generate marketing copy then translate it; write an outline, check it against criteria, then write the document."
+   ],
+   "examTips": [
+    "Keyword: fixed, known sequence of subtasks, accuracy over latency.",
+    "The gate is code, not another autonomous decision."
+   ],
+   "source": "https://www.anthropic.com/engineering/building-effective-agents",
+   "example": {
+    "title": "Chain with a gate",
+    "language": "python",
+    "code": "outline = llm(f\"Write an outline for: {topic}\")\nif not llm(f\"Does this outline meet the criteria? yes/no\\n{outline}\").startswith(\"yes\"):\n    raise ValueError(\"gate failed\")   # programmatic gate\ndoc = llm(f\"Write the document from this outline:\\n{outline}\")"
+   }
+  },
+  {
+   "heading": "Routing",
+   "notes": [
+    "An input is classified and directed to a specialized follow-up task or prompt. Classification can be done by an LLM or a traditional classifier.",
+    "Use when distinct categories are better handled separately and classification is accurate. It avoids optimizing for one input type at the expense of others.",
+    "Examples: routing customer service queries (general, refunds, technical) to different processes and tools; sending easy questions to a small cheap model (Haiku) and hard ones to a more capable model (Sonnet)."
+   ],
+   "examTips": [
+    "Routing picks ONE path for the input; parallelization runs several at once.",
+    "Model-size routing for cost is a classic routing use case."
+   ],
+   "source": "https://www.anthropic.com/engineering/building-effective-agents",
+   "example": {
+    "title": "Router",
+    "language": "python",
+    "code": "route = llm(f\"Classify as general|refund|technical: {query}\").strip()\nhandlers = {\"general\": general_prompt, \"refund\": refund_flow, \"technical\": tech_flow}\nanswer = handlers[route](query)"
+   }
+  },
+  {
+   "heading": "Parallelization: sectioning and voting",
+   "notes": [
+    "**Sectioning**: split a task into independent subtasks run simultaneously. Examples: one model answers while another screens for inappropriate content; automated evals where each call scores a different aspect.",
+    "**Voting**: run the same task multiple times to get diverse outputs or confidence. Examples: several prompts review code for vulnerabilities; multiple prompts judge content appropriateness with different vote thresholds to balance false positives and negatives.",
+    "Use when subtasks can run in parallel for speed or when multiple perspectives raise confidence. Separate LLM calls per consideration often beat one call handling everything."
+   ],
+   "examTips": [
+    "Sectioning = different independent subtasks; voting = same task repeated.",
+    "Voting thresholds tune false-positive vs false-negative trade-off.",
+    "Subtasks are predefined here; if the orchestrator decides them dynamically it is orchestrator-workers."
+   ],
+   "source": "https://www.anthropic.com/engineering/building-effective-agents",
+   "example": {
+    "title": "Sectioning and voting",
+    "language": "python",
+    "code": "# sectioning: different independent jobs\nanswer, safe = await asyncio.gather(respond(q), guardrail(q))\n# voting: same job, several tries\nvotes = await asyncio.gather(*[review_code(code) for _ in range(3)])\nflagged = sum(votes) >= 2"
+   }
+  },
+  {
+   "heading": "Orchestrator-workers",
+   "notes": [
+    "A central LLM dynamically breaks a task down, delegates subtasks to worker LLMs and synthesizes the results.",
+    "Key difference from parallelization: subtasks are **not predefined**; the orchestrator derives them from the specific input.",
+    "Use for complex tasks where needed subtasks cannot be predicted: coding changes across multiple files, or search gathering from multiple sources."
+   ],
+   "examTips": [
+    "Unpredictable number/nature of subtasks points to orchestrator-workers, not sectioning."
+   ],
+   "source": "https://www.anthropic.com/engineering/building-effective-agents",
+   "example": {
+    "title": "Orchestrator sketch",
+    "language": "python",
+    "code": "plan = json.loads(llm(f\"Split into subtasks as JSON list: {task}\"))\nresults = [llm(f\"Do subtask: {s}\") for s in plan]   # workers\nfinal = llm(f\"Synthesize:\\n{results}\")"
+   }
+  },
+  {
+   "heading": "Evaluator-optimizer",
+   "notes": [
+    "One LLM generates a response, another evaluates it and gives feedback, in a loop.",
+    "Use when there are clear evaluation criteria and iteration adds measurable value. Two fit signals: responses improve when a human articulates feedback, and the LLM can provide that feedback itself.",
+    "Examples: literary translation with a critic, multi-round search where the evaluator decides if more searching is needed."
+   ],
+   "examTips": [
+    "Requires clear criteria; without them the loop wastes cost.",
+    "Distinct from voting: here feedback is fed back to improve a single output."
+   ],
+   "source": "https://www.anthropic.com/engineering/building-effective-agents",
+   "example": {
+    "title": "Generate-evaluate loop",
+    "language": "python",
+    "code": "draft = llm(task)\nfor _ in range(3):  # stopping condition\n    fb = llm(f\"Critique against criteria; reply PASS if fine:\\n{draft}\")\n    if fb.startswith(\"PASS\"): break\n    draft = llm(f\"Improve using feedback:\\n{fb}\\n{draft}\")"
+   }
+  },
+  {
+   "heading": "Autonomous agents",
+   "notes": [
+    "Agents start from a human command or interactive clarification, then plan and operate independently, returning to the human for information or judgment.",
+    "At each step the agent gets **ground truth** from the environment (tool results, code execution). It may pause at checkpoints or blockers and typically ends on completion; add stopping conditions such as a max iteration count.",
+    "Implementation is usually an LLM using tools in a loop based on environmental feedback, so toolset design and documentation are critical.",
+    "Use for open-ended problems where step count cannot be predicted or hardcoded, in trusted environments at scale. Costs are higher and errors can compound; test extensively in sandboxes with guardrails.",
+    "Examples: SWE-bench coding agent, computer use reference implementation. Good application areas: customer support and coding (clear success criteria, feedback loops, human oversight)."
+   ],
+   "examTips": [
+    "Compounding errors and cost are the key risks; sandbox plus guardrails is the mitigation.",
+    "Maximum iterations is the canonical stopping condition."
+   ],
+   "source": "https://www.anthropic.com/engineering/building-effective-agents",
+   "example": {
+    "title": "Agent loop",
+    "language": "python",
+    "code": "messages=[{\"role\":\"user\",\"content\":task}]\nfor _ in range(MAX_ITERS):\n    r = client.messages.create(model=MODEL, max_tokens=2048, tools=tools, messages=messages)\n    if r.stop_reason != \"tool_use\": break\n    messages.append({\"role\":\"assistant\",\"content\":r.content})\n    results=[run_tool(b) for b in r.content if b.type==\"tool_use\"]\n    messages.append({\"role\":\"user\",\"content\":results})"
+   }
+  },
+  {
+   "heading": "Choosing a pattern",
+   "notes": [
+    "Fixed, known sequence: **prompt chaining**. Distinct input categories: **routing**. Independent subtasks or need for confidence: **parallelization**. Unpredictable subtasks: **orchestrator-workers**. Clear criteria plus iterative refinement: **evaluator-optimizer**. Open-ended, unpredictable steps: **autonomous agent**.",
+    "Patterns are not prescriptive; combine and customize them, measure performance and add complexity only when outcomes improve."
+   ],
+   "examTips": [
+    "Match the scenario keyword to the pattern; eliminate answers that add autonomy the task does not need."
+   ],
+   "source": "https://www.anthropic.com/engineering/building-effective-agents"
+  },
+  {
+   "heading": "Tool engineering: the agent-computer interface",
+   "notes": [
+    "Treat tool definitions with as much prompt-engineering effort as main prompts. Put yourself in the model's shoes: is use obvious from the description and parameters? Include examples, edge cases, input format requirements and boundaries from other tools.",
+    "Improve naming and descriptions like a docstring for a junior developer; test empirically with many example inputs; **poka-yoke** tools so mistakes are harder to make.",
+    "Format advice: give the model room to think before committing, prefer formats close to natural internet text, avoid overhead like line-count tracking or heavy escaping.",
+    "SWE-bench example: requiring absolute file paths eliminated errors after the agent changed directories."
+   ],
+   "examTips": [
+    "Poka-yoke = change the tool's arguments so errors are hard to make.",
+    "More time was spent optimizing tools than the overall prompt."
+   ],
+   "source": "https://www.anthropic.com/engineering/building-effective-agents"
+  },
+  {
+   "heading": "Multi-agent research system: architecture",
+   "notes": [
+    "Orchestrator-worker design: a lead agent (Opus 4) plans, saves the plan to memory and spawns parallel subagents (Sonnet 4) that search in their own context windows. Subagents report back; a CitationAgent then attributes claims to sources.",
+    "Unlike static RAG, it performs adaptive multi-step search. It outperformed single-agent Opus 4 by 90.2% on the internal research eval.",
+    "Token usage alone explained about 80% of BrowseComp performance variance. Agents use roughly 4x chat tokens and multi-agent systems about 15x, so use them for high-value, highly parallelizable tasks, not tightly coupled work like most coding.",
+    "Parallel subagents and parallel tool calls cut research time by up to 90% on complex queries."
+   ],
+   "examTips": [
+    "Multi-agent is justified by value and parallelizability because of the ~15x token cost.",
+    "Subagents have separate context windows, which is a main benefit."
+   ],
+   "source": "https://www.anthropic.com/engineering/multi-agent-research-system"
+  },
+  {
+   "heading": "Multi-agent research system: lessons",
+   "notes": [
+    "Prompting: simulate with exact prompts and tools to see failures; give subagents detailed briefs (objective, output format, tools, boundaries) because vague tasks cause duplicated work; embed effort-scaling rules (1 agent with 3-10 calls for simple facts, 2-4 subagents for comparisons, 10+ for complex research); start broad then narrow; use extended thinking as a planning scratchpad.",
+    "Tool design: distinct purposes and clear descriptions; letting Claude rewrite flawed tool descriptions cut task time by 40%.",
+    "Evaluation: start with about 20 real queries; use an LLM judge with a rubric (factual accuracy, citation accuracy, completeness, source quality, tool efficiency); keep human testing; judge end state, not exact path.",
+    "Production: checkpoint and resume rather than restart, full tracing, rainbow deployments to avoid disrupting running agents, filesystem outputs passed by reference, summarize completed phases and hand off to fresh subagents near context limits. Synchronous subagent execution is a bottleneck."
+   ],
+   "examTips": [
+    "Evaluate outcomes not the path taken.",
+    "Rainbow deployments gradually shift traffic so in-flight agents are not broken."
+   ],
+   "source": "https://www.anthropic.com/engineering/multi-agent-research-system"
+  }
+ ],
+ "keyTakeaways": [
+  "Workflows follow predefined code paths; agents direct their own process and tool use.",
+  "Start simple; add agentic complexity only when it demonstrably improves outcomes.",
+  "Augmented LLM = retrieval + tools + memory.",
+  "Prompt chaining: fixed sequential subtasks, with optional gates; trades latency for accuracy.",
+  "Routing: classify input and send to a specialized path, including cheap vs capable models.",
+  "Parallelization: sectioning (different independent subtasks) vs voting (same task repeated).",
+  "Orchestrator-workers: subtasks decided dynamically, unlike sectioning.",
+  "Evaluator-optimizer: needs clear criteria and feedback that improves output.",
+  "Autonomous agents loop on tool results with ground truth, checkpoints and stop conditions; cost and compounding errors are risks.",
+  "Three principles: simplicity, transparency, a carefully designed ACI.",
+  "Multi-agent research: Opus lead plus Sonnet subagents, ~15x chat tokens, best for parallelizable high-value tasks.",
+  "Evaluate end state, start with ~20 queries, and invest in tool descriptions."
+ ],
+ "glossary": [
+  {
+   "term": "Agentic system",
+   "definition": "Umbrella term covering workflows and agents."
+  },
+  {
+   "term": "Workflow",
+   "definition": "LLMs and tools orchestrated through predefined code paths."
+  },
+  {
+   "term": "Agent",
+   "definition": "System where the LLM dynamically directs its own process and tool use."
+  },
+  {
+   "term": "Augmented LLM",
+   "definition": "An LLM with retrieval, tools and memory."
+  },
+  {
+   "term": "Gate",
+   "definition": "Programmatic check between steps in a prompt chain."
+  },
+  {
+   "term": "Sectioning",
+   "definition": "Parallel execution of different independent subtasks."
+  },
+  {
+   "term": "Voting",
+   "definition": "Running the same task several times to aggregate outputs."
+  },
+  {
+   "term": "Orchestrator",
+   "definition": "LLM that dynamically decomposes tasks and delegates to workers."
+  },
+  {
+   "term": "Evaluator-optimizer",
+   "definition": "Generate-critique loop between two LLM roles."
+  },
+  {
+   "term": "ACI",
+   "definition": "Agent-computer interface: the design of tools and their documentation for the model."
+  },
+  {
+   "term": "Poka-yoke",
+   "definition": "Designing tool arguments so mistakes are hard to make."
+  },
+  {
+   "term": "Ground truth",
+   "definition": "Real environment feedback such as tool results or code execution output."
+  },
+  {
+   "term": "Rainbow deployment",
+   "definition": "Gradually shifting traffic between versions so running agents are not disrupted."
+  },
+  {
+   "term": "CitationAgent",
+   "definition": "Agent in the research system that attributes claims to sources."
+  }
+ ],
+ "quiz": [
+  {
+   "q": "A team must translate generated marketing copy into five languages in a fixed sequence: draft, check tone against criteria, translate. Which pattern fits best?",
+   "options": [
+    "Autonomous agent",
+    "Prompt chaining with a gate",
+    "Orchestrator-workers",
+    "Voting"
+   ],
+   "answer": 1,
+   "explanation": "The subtasks are fixed and sequential, so prompt chaining with a programmatic gate fits. The others add unneeded dynamism.",
+   "source": "https://www.anthropic.com/engineering/building-effective-agents"
+  },
+  {
+   "q": "A support system receives refund requests, technical issues and general questions, each needing different tools and prompts. Which pattern?",
+   "options": [
+    "Routing",
+    "Evaluator-optimizer",
+    "Sectioning",
+    "Autonomous agent"
+   ],
+   "answer": 0,
+   "explanation": "Distinct categories with accurate classification is the routing use case.",
+   "source": "https://www.anthropic.com/engineering/building-effective-agents"
+  },
+  {
+   "q": "To cut cost, easy questions go to Haiku and hard ones to Sonnet. This is an example of:",
+   "options": [
+    "Voting",
+    "Routing",
+    "Orchestrator-workers",
+    "Prompt chaining"
+   ],
+   "answer": 1,
+   "explanation": "Classifying input and sending it to a specialized path (model) is routing.",
+   "source": "https://www.anthropic.com/engineering/building-effective-agents"
+  },
+  {
+   "q": "One LLM call answers the user while another independent call screens the query for inappropriate content, simultaneously. Which variation?",
+   "options": [
+    "Voting",
+    "Sectioning",
+    "Evaluator-optimizer",
+    "Routing"
+   ],
+   "answer": 1,
+   "explanation": "Different independent subtasks in parallel is sectioning. Voting repeats the same task.",
+   "source": "https://www.anthropic.com/engineering/building-effective-agents"
+  },
+  {
+   "q": "Three differently prompted reviewers inspect code for vulnerabilities and a flag is raised if two agree. Which pattern?",
+   "options": [
+    "Sectioning",
+    "Prompt chaining",
+    "Parallelization via voting",
+    "Orchestrator-workers"
+   ],
+   "answer": 2,
+   "explanation": "The same task is run several times and results aggregated by threshold: voting.",
+   "source": "https://www.anthropic.com/engineering/building-effective-agents"
+  },
+  {
+   "q": "A coding product must modify an unknown number of files depending on the request. Which pattern fits?",
+   "options": [
+    "Orchestrator-workers",
+    "Sectioning",
+    "Routing",
+    "Prompt chaining"
+   ],
+   "answer": 0,
+   "explanation": "Subtasks cannot be predefined, so a central LLM must determine them dynamically.",
+   "source": "https://www.anthropic.com/engineering/building-effective-agents"
+  },
+  {
+   "q": "Which feature distinguishes orchestrator-workers from sectioning?",
+   "options": [
+    "It uses tools",
+    "Subtasks are determined dynamically by the orchestrator",
+    "It runs in parallel",
+    "It uses multiple models"
+   ],
+   "answer": 1,
+   "explanation": "Sectioning has predefined independent subtasks; orchestrator-workers derives them from the input.",
+   "source": "https://www.anthropic.com/engineering/building-effective-agents"
+  },
+  {
+   "q": "A literary translation task has clear quality criteria and a critic LLM can point out missed nuance. Which pattern?",
+   "options": [
+    "Evaluator-optimizer",
+    "Routing",
+    "Voting",
+    "Sectioning"
+   ],
+   "answer": 0,
+   "explanation": "Generator plus evaluator feedback loop with clear criteria is evaluator-optimizer.",
+   "source": "https://www.anthropic.com/engineering/building-effective-agents"
+  },
+  {
+   "q": "What is the recommended first step when starting to build an LLM application?",
+   "options": [
+    "Adopt a multi-agent framework",
+    "Build an autonomous agent",
+    "Use the simplest solution, often a single optimized LLM call, and add complexity only when needed",
+    "Fine-tune a model"
+   ],
+   "answer": 2,
+   "explanation": "Anthropic's guidance is simplicity first; agents trade latency and cost for performance.",
+   "source": "https://www.anthropic.com/engineering/building-effective-agents"
+  },
+  {
+   "q": "Which are the three core principles Anthropic recommends for agents?",
+   "options": [
+    "Speed, scale, safety",
+    "Simplicity, transparency, a well-crafted agent-computer interface",
+    "Memory, tools, retrieval",
+    "Routing, chaining, voting"
+   ],
+   "answer": 1,
+   "explanation": "Memory/tools/retrieval are the augmented LLM, not the principles.",
+   "source": "https://www.anthropic.com/engineering/building-effective-agents"
+  },
+  {
+   "q": "An agent keeps failing after changing directories because of relative paths. What fix did Anthropic's SWE-bench work use?",
+   "options": [
+    "Larger model",
+    "Require absolute file paths (poka-yoke)",
+    "More retries",
+    "Longer prompt"
+   ],
+   "answer": 1,
+   "explanation": "Changing the tool arguments made the mistake impossible; this illustrates poka-yoke in ACI design.",
+   "source": "https://www.anthropic.com/engineering/building-effective-agents"
+  },
+  {
+   "q": "Which is a key risk of autonomous agents named in the guidance?",
+   "options": [
+    "They cannot use tools",
+    "Higher cost and compounding errors",
+    "They require fine-tuning",
+    "They cannot loop"
+   ],
+   "answer": 1,
+   "explanation": "Mitigate with sandbox testing, guardrails and stopping conditions.",
+   "source": "https://www.anthropic.com/engineering/building-effective-agents"
+  },
+  {
+   "q": "Why is a multi-agent system poorly suited to most coding tasks, per Anthropic's research system post?",
+   "options": [
+    "Subagents cannot write code",
+    "Tasks are tightly coupled and multi-agent uses ~15x the tokens",
+    "Opus cannot orchestrate",
+    "Parallel tool calls are unsupported"
+   ],
+   "answer": 1,
+   "explanation": "Multi-agent suits high-value, highly parallelizable work; coding has many dependencies.",
+   "source": "https://www.anthropic.com/engineering/multi-agent-research-system"
+  },
+  {
+   "q": "In the multi-agent research system, how should the lead agent avoid subagents duplicating work?",
+   "options": [
+    "Give them vague goals",
+    "Give each a detailed brief: objective, output format, tools and boundaries",
+    "Run one subagent",
+    "Share a single context window"
+   ],
+   "answer": 1,
+   "explanation": "Vague instructions caused duplicate searches.",
+   "source": "https://www.anthropic.com/engineering/multi-agent-research-system"
+  },
+  {
+   "q": "How did Anthropic recommend evaluating the research agents?",
+   "options": [
+    "Only exact-path matching",
+    "Start with ~20 realistic queries, use an LLM judge with a rubric, and add human testing, judging end state",
+    "Wait for thousands of test cases",
+    "Rely only on human review"
+   ],
+   "answer": 1,
+   "explanation": "Early effect sizes are large, and agents can reach the same result by different paths.",
+   "source": "https://www.anthropic.com/engineering/multi-agent-research-system"
+  }
+ ]
+}

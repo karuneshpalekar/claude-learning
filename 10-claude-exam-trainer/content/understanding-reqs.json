@@ -1,0 +1,434 @@
+{
+  "slug": "understanding-reqs",
+  "title": "Understanding Reqs",
+  "overview": "Before writing a prompt or picking a model, Anthropic's docs say to define what success means, decide which Claude capabilities and trade-offs matter, and build evals that measure it. This objective covers SMART success criteria, the latency/cost/quality balance, turning criteria into automated evals, the official use-case guides (ticket routing, support chat, content moderation, summarization), and when an LLM is the right tool at all. The exam tests this because scenario questions usually hinge on choosing measurable criteria, matching a model and eval method to the requirement, and recognizing good LLM fits.",
+  "sources": [
+    {"title": "Define success criteria and build evaluations", "url": "https://platform.claude.com/docs/en/test-and-evaluate/define-success"},
+    {"title": "Create strong empirical evaluations", "url": "https://platform.claude.com/docs/en/test-and-evaluate/develop-tests"},
+    {"title": "Choosing the right model", "url": "https://platform.claude.com/docs/en/about-claude/models/choosing-a-model"},
+    {"title": "Reducing latency", "url": "https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/reduce-latency"},
+    {"title": "Guides to common use cases", "url": "https://platform.claude.com/docs/en/about-claude/use-case-guides/overview"},
+    {"title": "Ticket routing", "url": "https://platform.claude.com/docs/en/about-claude/use-case-guides/ticket-routing"},
+    {"title": "Customer support agent", "url": "https://platform.claude.com/docs/en/about-claude/use-case-guides/customer-support-chat"},
+    {"title": "Content moderation", "url": "https://platform.claude.com/docs/en/about-claude/use-case-guides/content-moderation"},
+    {"title": "Legal summarization", "url": "https://platform.claude.com/docs/en/about-claude/use-case-guides/legal-summarization"}
+  ],
+  "sections": [
+    {
+      "heading": "Why requirements come first: the develop-test-iterate cycle",
+      "notes": [
+        "The docs frame prompt engineering as a cycle: **define measurable success criteria, build evals that measure against them, then iterate** on prompts and model choice.",
+        "Without explicit criteria you cannot tell whether a prompt change or model swap helped. Criteria are the contract; evals are the test suite for that contract.",
+        "The model-selection guide says a good evaluation set is the single most important step when deciding to upgrade or change models.",
+        "Order of work: engineer a prompt that performs well first, then apply latency or cost reductions. Optimizing too early can hide what top performance looks like."
+      ],
+      "examTips": [
+        "If a question asks what to do BEFORE tuning prompts or switching models, the answer is define success criteria and build evals.",
+        "Do not reduce latency or cost first; establish a quality baseline, then optimize."
+      ],
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/define-success"
+    },
+    {
+      "heading": "Defining success criteria: Specific, Measurable, Achievable, Relevant",
+      "notes": [
+        "Good criteria are **Specific** (say exactly what you want), **Measurable** (quantitative metrics or well-defined qualitative scales), **Achievable** (grounded in benchmarks, prior experiments, research or expert knowledge, and realistic for current frontier models) and **Relevant** (aligned to the application's purpose and user needs).",
+        "Even vague goals like safety can be quantified. The docs contrast 'Safe outputs' (bad) with 'Less than 0.1% of outputs out of 10,000 trials flagged for toxicity by the content filter' (good).",
+        "Qualitative measures are fine if applied consistently, ideally alongside quantitative ones.",
+        "The docs' sentiment example: a good criterion names the metric (F1 of at least 0.85), the data (held-out test set of 10,000 diverse Twitter posts), and a baseline improvement (5% over current baseline)."
+      ],
+      "example": {
+        "title": "Bad vs good criterion (from the docs)",
+        "language": "text",
+        "code": "BAD:  The model should classify sentiments well\n\nGOOD: The sentiment analysis model should achieve an F1 score of at least 0.85\n      (Measurable, Specific) on a held-out test set of 10,000 diverse Twitter\n      posts (Relevant), which is a 5% improvement over the current baseline\n      (Achievable)."
+      },
+      "examTips": [
+        "A criterion with no number, no dataset, or no definition ('good', 'safe', 'fast') fails the Measurable/Specific test.",
+        "'Achievable' means targets are justified by benchmarks or prior experiments, not aspirational (for example 100% on ambiguous inputs).",
+        "A held-out test set means data not used while developing the prompt."
+      ],
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/define-success"
+    },
+    {
+      "heading": "Common success criteria and multidimensional evaluation",
+      "notes": [
+        "Common (non-exhaustive) criteria: **task fidelity** (including rare or hard inputs), **consistency** (similar inputs give similar answers), **relevance and coherence**, **tone and style**, **privacy preservation**, **context utilization**, **latency**, and **price**.",
+        "Most use cases need **multidimensional** evaluation: several criteria at once, each with its own threshold.",
+        "Metric families: task-specific (F1, BLEU, perplexity), generic (accuracy, precision, recall), operational (response time in ms, uptime %). Methods include A/B tests against a baseline, implicit user feedback such as task completion rate, and edge-case analysis (percent of edge cases handled without error).",
+        "Qualitative scales: Likert scales (for example 1 = nonsensical to 5 = perfectly logical) and expert rubrics."
+      ],
+      "example": {
+        "title": "Multidimensional criteria (from the docs)",
+        "language": "text",
+        "code": "On a held-out test set of 10,000 diverse Twitter posts, the sentiment\nanalysis model should achieve:\n- an F1 score of at least 0.85\n- 99.5% non-toxic outputs\n- 90% of errors would cause inconvenience, not egregious error\n- 95% response time < 200ms"
+      },
+      "examTips": [
+        "When a scenario lists competing needs (accuracy, speed, safety, cost), the right criteria set has a threshold for each, not one blended score.",
+        "Terms like 'inconvenience' or 'egregious' must themselves be defined precisely before they are measurable."
+      ],
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/define-success"
+    },
+    {
+      "heading": "Capabilities: matching requirements to what Claude and the platform offer",
+      "notes": [
+        "The model-selection guide's first questions are about **capabilities** (which features you need), **speed**, **cost** and **effort**. Write these down as requirements before comparing models.",
+        "Per the current docs the lineup is: Claude Fable 5.1 (highest capability), Claude Opus 5.5 (complex agentic coding and enterprise work), Claude Sonnet 5.5 (speed plus capability for everyday workloads), and Claude Haiku 5.5 (lowest latency and price).",
+        "Capability needs to check against model pages include context window and output limits, vision, tool use, and thinking behavior. The docs point to the model comparison table for context windows, output limits and prices.",
+        "Some models have always-on adaptive thinking, and some integrations (forced tool use, disabling thinking, a specific computer-use tool version) have breaking changes when switching models, so check each model's 'what's new' page before migrating.",
+        "Claude is strongest on language tasks that rely on semantic understanding: classification, extraction, summarization, conversational support, and moderation."
+      ],
+      "examTips": [
+        "Requirements that depend on a specific feature (for example vision, tool use, long context) are capability requirements; verify them on the model comparison page, do not assume.",
+        "Do not memorize model IDs for the exam; know the tier roles: Haiku fastest/cheapest, Sonnet balanced, Opus strong agentic/complex, Fable top capability."
+      ],
+      "source": "https://platform.claude.com/docs/en/about-claude/models/choosing-a-model"
+    },
+    {
+      "heading": "Latency, cost and quality trade-offs",
+      "notes": [
+        "Choosing a model is a balance of **capabilities, speed and cost**. There are two starting strategies: **efficiency-first** (start with Haiku, test, upgrade only for specific capability gaps) and **capability-first** (start with Opus, optimize prompts, then lower effort or downgrade models over time).",
+        "Efficiency-first suits prototyping, tight latency, cost-sensitive and high-volume straightforward tasks. Capability-first suits complex reasoning, nuanced understanding and cases where accuracy outweighs cost.",
+        "The **effort parameter** trades intelligence for latency and cost inside one model, and the docs say tuning effort is often a better lever than switching models. Start at the model's default and adjust based on your evals.",
+        "Latency levers: pick a faster model (Haiku, optionally at `low` effort), keep prompts and outputs short (ask for sentence or paragraph limits rather than exact word counts; `max_tokens` is a blunt hard cap that can cut text off mid-sentence), and **stream** responses to improve perceived responsiveness.",
+        "Latency terms: baseline latency, and **time to first token (TTFT)**, which matters most when streaming.",
+        "Cost levers seen in the guides: smaller model, shorter output (drop optional explanation fields), batching several items per request when real-time is not needed, and prompt caching. Multi-model setups pair a cheaper model with a frontier model (executor/advisor or orchestrator/workers).",
+        "Cost scale example from the moderation guide: for 1B short posts per month, Haiku was estimated at roughly $3.6K per month versus about $180K for the largest Opus models, which is why Haiku is recommended for high-volume moderation."
+      ],
+      "example": {
+        "title": "Fast, cheap configuration for a latency-sensitive task",
+        "language": "python",
+        "code": "import anthropic\nclient = anthropic.Anthropic()\n\n# Time-sensitive: Haiku 5.5 at low effort, streaming for fast first token\nwith client.messages.stream(\n    model=\"claude-haiku-5-5\",\n    max_tokens=1024,\n    output_config={\"effort\": \"low\"},\n    messages=[{\"role\": \"user\", \"content\": \"Summarize this feedback in 2 sentences: ...\"}],\n) as stream:\n    for text in stream.text_stream:\n        print(text, end=\"\")"
+      },
+      "examTips": [
+        "Real-time, high-volume, simple task: Haiku-class model, low effort, streaming. Deep reasoning where errors are costly: larger model or higher effort.",
+        "Lowering effort is usually tried before switching models; upgrade models only when evals show a capability gap.",
+        "Streaming lowers perceived latency (TTFT), not total generation time.",
+        "Never choose a model by intuition alone: the docs say compare candidates on your own evals for accuracy, quality and edge cases, then weigh cost."
+      ],
+      "source": "https://platform.claude.com/docs/en/about-claude/models/choosing-a-model"
+    },
+    {
+      "heading": "Designing evals from criteria",
+      "notes": [
+        "Three eval design principles: **be task-specific** (mirror the real task distribution and include edge cases), **automate when possible** (multiple choice, string match, code-graded, or LLM-graded), and **prioritize volume over quality** (many automatically graded cases with slightly lower signal beat a few hand-graded ones).",
+        "Edge cases to include: irrelevant or nonexistent input, overly long input, poor or harmful user input in chat, and ambiguous cases where even humans disagree. Examples: sarcasm and mixed sentiment for sentiment analysis, typos for FAQ bots, misleading titles for summarization, angry customers for tone, implicit health information for privacy.",
+        "Every criterion maps to a method and test data. The docs' table: task fidelity -> exact match on 1,000 labeled tweets; consistency -> cosine similarity of SBERT embeddings on 50 groups of paraphrased questions; relevance and coherence -> ROUGE-L F1 on 200 articles with reference summaries; tone and style -> LLM Likert 1-5 on 100 customer inquiries; privacy -> LLM binary PHI yes/no on 500 simulated patient queries."
+      ],
+      "example": {
+        "title": "Exact-match eval for sentiment (adapted from the docs)",
+        "language": "python",
+        "code": "def evaluate_exact_match(model_output, correct_answer):\n    return model_output.strip().lower() == correct_answer.lower()\n\noutputs = [\n    get_completion(\n        f\"Classify this as 'positive', 'negative', 'neutral', or 'mixed'. \"\n        f\"Output only the label: {t['text']}\"\n    )\n    for t in tweets  # includes sarcasm and mixed-sentiment edge cases\n]\naccuracy = sum(\n    evaluate_exact_match(o, t[\"sentiment\"]) for o, t in zip(outputs, tweets)\n) / len(tweets)"
+      },
+      "examTips": [
+        "Pick the grader to fit the criterion: closed-set labels -> exact match; paraphrase consistency -> embedding cosine similarity; summary overlap with a reference -> ROUGE-L; subjective qualities like tone -> LLM Likert; yes/no policy checks -> LLM binary classification.",
+        "'Volume over quality' means prefer a large automated set over a small hand-graded one.",
+        "Test sets that only contain easy, clean inputs are a trap; good evals deliberately include edge cases."
+      ],
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/develop-tests"
+    },
+    {
+      "heading": "Grading methods: code, LLM and human",
+      "notes": [
+        "**Code-based grading** (exact match, string match, similarity metrics, ROUGE) is fastest, cheapest and most reliable when answers are closed-form.",
+        "**LLM-based grading** scales to subjective criteria. Give the grader a clear rubric with defined scale endpoints and constrain its output ('Output only the number' or 'Output only yes or no'), then parse and validate it. The docs say it is generally best practice to use a **different model to grade than the one that generated the output**.",
+        "**Human grading** (expert rubrics, reference summaries) is the highest quality but expensive and slow; the legal summarization guide suggests using it on a few summaries as a validation check before deploying.",
+        "For summaries, evaluation lacks clear-cut objective metrics, so combine ROUGE (recall-oriented content overlap), embedding similarity, LLM grading against a rubric, and human review."
+      ],
+      "examTips": [
+        "Choose the cheapest grader that is valid for the criterion: do not use humans for exact-label checks, and do not use exact match for open-ended tone.",
+        "LLM-grader output should be constrained and parsed; free-form grader replies are hard to aggregate."
+      ],
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/develop-tests"
+    },
+    {
+      "heading": "Use-case guide: classification and ticket routing",
+      "notes": [
+        "Start by understanding your current support process and defining **user intent categories** (for example technical issue, account management, billing/order, security, compliance and legal, emergency).",
+        "Sample success criteria and targets from the guide: classification consistency 95% or higher; adaptation to new categories within about 50-100 sample tickets (above 90% accuracy); no more than a 5-10% accuracy drop for non-primary languages; at least 80% accuracy on edge cases; accuracy within 2-3% across customer groups (bias); at least 90% accuracy using only title plus a brief description.",
+        "Business metrics: routing accuracy (benchmarks often 90-95%), time-to-assignment, rerouting rate, escalation rate (below 20%, best-in-class 10% or less), agent productivity (10-20% gain), cost per ticket (10-15% reduction).",
+        "Model choice: Claude Haiku 5.5 suits high-volume classification at `low` effort; move to a larger model if you need deep subject expertise, very many categories, or complex reasoning.",
+        "Prompts use structured inputs (for example the ticket in tags) and constrained output so the result can be routed by code."
+      ],
+      "example": {
+        "title": "Constrained classification prompt (pattern from the guide)",
+        "language": "text",
+        "code": "You will classify a customer support request into one category.\nCategories: Technical issue, Account management, Billing, Security concern, Other.\n\n<request>{ticket_text}</request>\n\nRespond with only the category name."
+      },
+      "examTips": [
+        "Strong signals for an LLM over traditional ML in classification: little labeled data, categories that change, messy unstructured text, semantic rules, need for interpretable reasoning, ambiguous edge cases, multilingual input.",
+        "Classification is a high-volume, low-complexity task, so default to a small fast model and verify with evals."
+      ],
+      "source": "https://platform.claude.com/docs/en/about-claude/use-case-guides/ticket-routing"
+    },
+    {
+      "heading": "Use-case guide: customer support agent",
+      "notes": [
+        "Good fit when there is **high volume of repetitive queries, need for quick information synthesis, 24/7 availability, rapid scaling at peaks, and consistent brand voice**.",
+        "Design steps: define the ideal chat interaction, break it into unique tasks, set success criteria, pick a model, write the prompt with static content and 4-5 sample good interactions, add **tool use** for dynamic actions (for example generating a quote), then deploy.",
+        "Sample targets: query comprehension 95%+, response accuracy on basic company facts 100%, content generation (such as quotes) 100%, escalation accuracy 95%+, sentiment maintained or improved in 90% of conversations. Also track deflection rate, CSAT and average handle time.",
+        "Model choice is a latency/cost/quality call: the guide suggests Opus-class for complex multistep support, and Haiku-class when the flow has multiple prompts with RAG, tool use or long context where latency and cost dominate.",
+        "Tool use in the guide is client-side: Claude emits a `tool_use` block, your code runs it, and you return a `tool_result`."
+      ],
+      "examTips": [
+        "Escalation to a human is itself a measurable requirement (escalation accuracy), not an afterthought.",
+        "Where wrong data is costly (quotes, account facts), the targets are 100%, not 95%."
+      ],
+      "source": "https://platform.claude.com/docs/en/about-claude/use-case-guides/customer-support-chat"
+    },
+    {
+      "heading": "Use-case guide: content moderation",
+      "notes": [
+        "Claude fits moderation when you want **fast low-cost deployment without training data, semantic understanding** (for example 'killed it' as a metaphor), **consistent policy application, frequently changing policies** (edit the prompt, no retraining), **explainable decisions, multilingual support, and multimodal moderation**.",
+        "Define **risk categories with clear definitions**; the guide shows that adding a definition for 'Specialized Advice' caused an investment tip to be flagged that previously passed.",
+        "Request structured JSON output (violation, categories, optional explanation). Prefer **risk levels** (for example 0 none to 3 high) over a binary result so you can auto-block high risk and send medium risk to human review.",
+        "Evaluate as classification: build a labeled set with edge cases and track **precision** (flagged items that were truly violations) and **recall** (true violations caught).",
+        "Cost reduction: use Haiku for volume, drop the explanation field to cut output tokens, batch multiple messages per request when real-time decisions are not needed, and use prompt caching.",
+        "Claude's built-in safety behavior may still flag extremely dangerous content even if your prompt says not to moderate it; review the Usage Policy."
+      ],
+      "example": {
+        "title": "Moderation prompt returning structured JSON",
+        "language": "text",
+        "code": "Determine whether the following message warrants moderation, based on the unsafe categories below.\n\n<message>{message}</message>\n<categories>{category_definitions}</categories>\n\nRespond with ONLY a JSON object:\n{\"violation\": <boolean>, \"categories\": [violated categories], \"explanation\": <optional>}"
+      },
+      "examTips": [
+        "Missing real violations is a recall problem; over-flagging legitimate content is a precision problem. Match the metric to the business risk.",
+        "Policy change? Update category definitions and examples in the prompt; no retraining is needed, which is a key advantage over traditional ML."
+      ],
+      "source": "https://platform.claude.com/docs/en/about-claude/use-case-guides/content-moderation"
+    },
+    {
+      "heading": "Use-case guide: summarization",
+      "notes": [
+        "Good fit for **high-volume document review, automated metadata extraction, standardized summaries, precise citations, and faster research**.",
+        "Decide up front **which details to extract** (for example parties, dates, terms, clauses) and put them in the prompt so output is standardized.",
+        "Criteria for summaries: factual correctness, domain precision, conciseness, consistency, readability, and bias/fairness. Evaluation is hard and subjective, so combine ROUGE, embedding similarity, LLM grading and human expert review.",
+        "Accuracy matters most for legal text, so the guide recommends an Opus-class model, with Haiku as a cheaper option when volume makes cost a concern. In its worked estimate for 1,000 sublease agreements, the Opus estimate was about $556 versus about $62 for Haiku.",
+        "Documents longer than the context window can be handled with **meta-summarization**: split into chunks, summarize each, then summarize the summaries."
+      ],
+      "example": {
+        "title": "Meta-summarization pattern (adapted from the docs)",
+        "language": "python",
+        "code": "def chunk_text(text, chunk_size=20000):\n    return [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]\n\ndef summarize_long_document(text, details_to_extract, model, max_tokens):\n    chunk_summaries = [\n        summarize_document(c, details_to_extract, model=model, max_tokens=max_tokens)\n        for c in chunk_text(text)\n    ]\n    # Final pass combines the chunk summaries into one coherent summary\n    return summarize_document(\"\".join(chunk_summaries), details_to_extract,\n                              model=model, max_tokens=max_tokens)"
+      },
+      "examTips": [
+        "Summary quality has no single objective metric; expect answers that combine automated metrics with rubric-based LLM grading and spot human review.",
+        "High-accuracy regulated content leans toward the stronger model; high volume with tolerable error leans toward Haiku."
+      ],
+      "source": "https://platform.claude.com/docs/en/about-claude/use-case-guides/legal-summarization"
+    },
+    {
+      "heading": "When is an LLM the appropriate tool?",
+      "notes": [
+        "The guides repeat the same indicators for choosing an LLM over traditional approaches: **limited labeled data** (a few dozen examples can be enough), **categories or policies that evolve** (edit the prompt instead of retraining), **complex unstructured text**, **rules based on semantic understanding**, **need for readable reasoning**, **ambiguous edge cases**, and **multilingual support without separate models**.",
+        "Other fits: high-volume repetitive language tasks, 24/7 availability, consistent tone, and information synthesis across large knowledge bases.",
+        "Weaker fits (inferred from the trade-off guidance): tasks that are deterministic and fully rule-expressible, hard real-time budgets that even the fastest model cannot meet, or cases where cost per call outweighs value at your volume. Decide with evals and the cost estimates, not assumption.",
+        "Choose the build path by control needed: Messages API (most control, you write the agent loop), Claude Agent SDK (loop and tool execution provided in a process you run), Claude Managed Agents (Anthropic hosts loop and runtime)."
+      ],
+      "examTips": [
+        "Evolving categories plus few labels strongly favors an LLM; a stable, huge labeled dataset plus strict latency can favor traditional ML.",
+        "Even when an LLM fits, validate with your own eval set before committing."
+      ],
+      "source": "https://platform.claude.com/docs/en/about-claude/use-case-guides/ticket-routing"
+    }
+  ],
+  "keyTakeaways": [
+    "Define measurable success criteria first, then build evals, then iterate on prompts and models.",
+    "Good criteria are Specific, Measurable, Achievable, Relevant (SMART-style per the docs).",
+    "Replace vague goals ('safe', 'good') with a metric, a threshold and a named test set.",
+    "Most use cases need multidimensional criteria: accuracy, safety, latency, cost each with a threshold.",
+    "Common criteria: task fidelity, consistency, relevance/coherence, tone/style, privacy, context utilization, latency, price.",
+    "Evals should be task-specific, automated where possible, and prioritize volume over hand-graded quality; include edge cases.",
+    "Match grader to criterion: exact match, cosine similarity, ROUGE-L, LLM Likert, LLM binary, or human review.",
+    "Use a different model to grade than to generate, with a clear rubric and constrained output.",
+    "Tune effort before swapping models; start efficiency-first (Haiku) or capability-first (Opus) and decide by evals.",
+    "Reduce latency by faster model, shorter prompts/outputs and streaming, but only after quality is established.",
+    "Classification and moderation: Haiku-class for volume, track precision/recall, use risk levels and clear category definitions.",
+    "LLMs fit when labels are scarce, policies change, text is unstructured and semantics matter."
+  ],
+  "glossary": [
+    {"term": "Success criteria", "definition": "Measurable statements of what a working solution must achieve, defined before building."},
+    {"term": "Eval", "definition": "A test set plus a grading method that measures a model's performance against the success criteria."},
+    {"term": "Held-out test set", "definition": "Data not used during prompt development, reserved for unbiased evaluation."},
+    {"term": "Task fidelity", "definition": "How well the model performs the task itself, including on rare or challenging inputs."},
+    {"term": "Multidimensional evaluation", "definition": "Assessing several criteria (for example accuracy, safety, latency) with separate thresholds."},
+    {"term": "Exact match", "definition": "Code-based grading comparing normalized output to the expected answer."},
+    {"term": "ROUGE-L", "definition": "Summary metric based on longest common subsequence overlap with a reference summary."},
+    {"term": "Cosine similarity", "definition": "Embedding-based measure of how similar two texts are, used to test consistency."},
+    {"term": "LLM-based grading", "definition": "Using a model with a rubric to score outputs, ideally a different model than the generator."},
+    {"term": "Likert scale", "definition": "Ordinal rating scale such as 1 to 5 used for qualitative criteria like tone."},
+    {"term": "Precision / recall", "definition": "Precision: share of flagged items that are correct. Recall: share of true positives that were caught."},
+    {"term": "Time to first token (TTFT)", "definition": "Time from sending the prompt until the first response token arrives; improved perception via streaming."},
+    {"term": "Effort parameter", "definition": "Setting that trades intelligence for latency and cost within a model."},
+    {"term": "Meta-summarization", "definition": "Summarizing chunks of a long document separately, then summarizing the chunk summaries."},
+    {"term": "Risk levels", "definition": "Graded moderation output (for example 0-3) allowing different actions per severity."}
+  ],
+  "quiz": [
+    {
+      "q": "A team's requirement says: 'The classifier should work well.' What is the best way to rewrite it per Anthropic's guidance on success criteria?",
+      "options": [
+        "Add the word 'very' so reviewers know the bar is high",
+        "State a metric, threshold, and test set, for example F1 of at least 0.85 on a held-out set of 10,000 diverse posts",
+        "Wait to see how users react and then decide on a target",
+        "Replace it with 'use the largest available model'"
+      ],
+      "answer": 1,
+      "explanation": "Criteria must be Specific and Measurable: a named metric, a numeric threshold, and a defined dataset. The other options add no measurement or substitute a model choice for a requirement.",
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/define-success"
+    },
+    {
+      "q": "A product manager wants criteria for a customer-facing sentiment classifier that must be accurate, non-toxic, and fast. Which criteria set best reflects the docs' approach?",
+      "options": [
+        "A single average score that blends accuracy and speed",
+        "Only an F1 threshold, since accuracy is the main goal",
+        "Separate thresholds, such as F1 >= 0.85, 99.5% non-toxic outputs, and 95% of responses under 200 ms",
+        "A subjective review by the team lead each release"
+      ],
+      "answer": 2,
+      "explanation": "Most use cases need multidimensional evaluation with a threshold per dimension. A blended score hides trade-offs, F1 alone ignores safety and latency, and subjective review is not measurable.",
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/define-success"
+    },
+    {
+      "q": "Your FAQ bot should give semantically similar answers to paraphrased questions. Which eval method fits the 'consistency' criterion?",
+      "options": [
+        "Exact string match against one reference answer",
+        "Cosine similarity of embeddings across groups of paraphrased questions",
+        "ROUGE-L against a reference summary",
+        "A binary PHI classifier"
+      ],
+      "answer": 1,
+      "explanation": "Consistency is measured by embedding similarity between answers to paraphrased inputs. Exact match is too strict for varying wording, ROUGE-L targets summaries, and a PHI classifier tests privacy.",
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/develop-tests"
+    },
+    {
+      "q": "You are building an eval for a tone criterion (empathetic, professional). You have limited human reviewer time. What is the recommended approach?",
+      "options": [
+        "Have the same model that wrote the replies grade them with a free-form comment",
+        "Use exact match on a canned empathetic phrase",
+        "Use an LLM grader, preferably a different model, with a clear rubric and a constrained 1-5 output",
+        "Skip evaluation because tone cannot be measured"
+      ],
+      "answer": 2,
+      "explanation": "Subjective criteria can be graded by an LLM with a rubric and constrained output, and the docs recommend a different grader model. Free-form output is hard to aggregate, exact match is invalid for tone, and tone is measurable via Likert scales.",
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/develop-tests"
+    },
+    {
+      "q": "A team can either hand-grade 40 carefully chosen outputs or auto-grade 2,000 cases with a slightly noisier method. Which does Anthropic's eval guidance favor?",
+      "options": [
+        "The 40 hand-graded cases, because quality beats volume",
+        "The 2,000 auto-graded cases, because volume with automation beats a few high-quality hand-graded cases",
+        "Neither; evals are unnecessary after the prompt looks good",
+        "Only production traffic feedback"
+      ],
+      "answer": 1,
+      "explanation": "The docs say to prioritize volume over quality and automate when possible. Evals remain necessary, and production feedback complements rather than replaces them.",
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/develop-tests"
+    },
+    {
+      "q": "An eval set for a sentiment classifier contains only clean, clearly positive or negative tweets. What is the main weakness?",
+      "options": [
+        "It is too large to grade automatically",
+        "It lacks edge cases such as sarcasm, mixed sentiment, and ambiguous inputs that mirror the real distribution",
+        "It should include only multiple choice questions",
+        "It uses exact match, which is never valid"
+      ],
+      "answer": 1,
+      "explanation": "Evals should be task-specific and include edge cases like sarcasm and mixed sentiment. Size is not a flaw, and exact match is valid for closed label sets.",
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/develop-tests"
+    },
+    {
+      "q": "A startup must classify millions of short support messages per day with tight latency and cost limits. Categories are simple. Which starting approach matches the model-selection guidance?",
+      "options": [
+        "Capability-first with the most powerful model at max effort",
+        "Efficiency-first: start with Haiku (possibly at low effort), evaluate, and upgrade only if specific gaps appear",
+        "Fine-tune a traditional model before testing any Claude model",
+        "Skip evals and pick by price list"
+      ],
+      "answer": 1,
+      "explanation": "High-volume, straightforward, latency- and cost-sensitive tasks suit efficiency-first. Capability-first is for complex reasoning where accuracy outweighs cost, and evals are still required.",
+      "source": "https://platform.claude.com/docs/en/about-claude/models/choosing-a-model"
+    },
+    {
+      "q": "A team's model meets accuracy targets but responses are slightly too slow and costly. According to the docs, what should they try before switching to a different model?",
+      "options": [
+        "Remove all evals to speed things up",
+        "Tune the effort parameter and re-run evals",
+        "Double max_tokens",
+        "Ask for exact word counts in the output"
+      ],
+      "answer": 1,
+      "explanation": "The docs say tuning effort is often a better lever than switching models; adjust based on evals. Raising max_tokens does not cut cost, and exact word counts are less effective than sentence or paragraph limits.",
+      "source": "https://platform.claude.com/docs/en/about-claude/models/choosing-a-model"
+    },
+    {
+      "q": "A chat UI feels sluggish because users wait several seconds before seeing any text. Which change most directly improves perceived responsiveness without lowering quality?",
+      "options": [
+        "Enable streaming so tokens appear as they are generated",
+        "Set max_tokens very low",
+        "Remove the system prompt entirely",
+        "Switch to batch processing"
+      ],
+      "answer": 0,
+      "explanation": "Streaming reduces time to first visible token. A very low max_tokens truncates answers, removing the prompt may hurt quality, and batching is for non-real-time work.",
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/reduce-latency"
+    },
+    {
+      "q": "A company's support categories and policies change every quarter, and they have only a few dozen labeled tickets. Why does the ticket-routing guide point toward an LLM here?",
+      "options": [
+        "Traditional ML always outperforms LLMs on small data",
+        "LLMs can classify from few examples and adapt by editing the prompt instead of relabeling and retraining",
+        "LLMs require no evaluation",
+        "LLMs cannot handle multilingual tickets, so this is irrelevant"
+      ],
+      "answer": 1,
+      "explanation": "Limited labels and evolving categories are named indicators for an LLM. The other claims are false or reversed.",
+      "source": "https://platform.claude.com/docs/en/about-claude/use-case-guides/ticket-routing"
+    },
+    {
+      "q": "A moderation system auto-blocks everything flagged, causing many legitimate posts to be removed, but it rarely misses real violations. Which metric is weak, and what design change helps?",
+      "options": [
+        "Recall is weak; remove category definitions",
+        "Precision is weak; use graded risk levels so only high risk is auto-blocked and medium risk goes to human review",
+        "Latency is weak; stream the output",
+        "Cosine similarity is weak; add embeddings"
+      ],
+      "answer": 1,
+      "explanation": "Over-flagging legitimate content is a precision problem. Risk levels let you tune enforcement (block high, review medium). Recall is already good, and the other options do not address it.",
+      "source": "https://platform.claude.com/docs/en/about-claude/use-case-guides/content-moderation"
+    },
+    {
+      "q": "A support chatbot generates insurance quotes via a tool. Which success target does the support guide's approach imply for quote accuracy?",
+      "options": [
+        "About 70%, since users can check the quote themselves",
+        "95%, the same as comprehension",
+        "100%, because generated information like quotes is vital to the interaction",
+        "No target is needed for tool outputs"
+      ],
+      "answer": 2,
+      "explanation": "The guide sets 100% for content generation effectiveness such as quotes, and for basic company facts, while comprehension and escalation use 95%+.",
+      "source": "https://platform.claude.com/docs/en/about-claude/use-case-guides/customer-support-chat"
+    },
+    {
+      "q": "You must summarize contracts that exceed the model's context window and need reliable quality assessment. Which plan fits the summarization guidance?",
+      "options": [
+        "Truncate each contract to fit and rely on ROUGE only",
+        "Use meta-summarization over chunks, and evaluate with ROUGE, embeddings, LLM grading against a rubric, plus human expert spot checks",
+        "Ask the model to summarize without defining which details to extract",
+        "Use exact match against a single reference summary"
+      ],
+      "answer": 1,
+      "explanation": "Chunk then combine summaries for long documents, and since summary quality lacks one objective metric, combine several methods and human validation. Truncation loses content, and exact match is unsuited to summaries.",
+      "source": "https://platform.claude.com/docs/en/about-claude/use-case-guides/legal-summarization"
+    },
+    {
+      "q": "A team spends weeks tuning latency tricks before they have a working prompt. What does Anthropic's guidance say about this order?",
+      "options": [
+        "It is ideal; always optimize latency first",
+        "First engineer a prompt that performs well, then apply latency reductions, so you know what top performance looks like",
+        "Latency never matters",
+        "Latency should be handled only by increasing effort"
+      ],
+      "answer": 1,
+      "explanation": "The latency page notes that premature latency reduction can hide top performance. Establish quality, then optimize. Higher effort generally increases rather than reduces latency.",
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/reduce-latency"
+    }
+  ]
+}

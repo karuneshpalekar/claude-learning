@@ -1,0 +1,528 @@
+{
+  "slug": "hooks",
+  "title": "Hooks",
+  "overview": "Hooks let you run shell commands, HTTP calls, MCP tools or model prompts at defined points in Claude Code's lifecycle to enforce rules, automate tasks and inject context deterministically. The exam tests event names, matchers, stdin input, exit-code semantics (0 / 2 / other), JSON output fields such as permissionDecision, and how to configure and debug hooks, including SDK callbacks.",
+  "sources": [
+    {
+      "title": "Hooks reference",
+      "url": "https://code.claude.com/docs/en/hooks"
+    },
+    {
+      "title": "Automate actions with hooks (guide)",
+      "url": "https://code.claude.com/docs/en/hooks-guide"
+    },
+    {
+      "title": "Agent SDK: intercept and control behavior with hooks",
+      "url": "https://code.claude.com/docs/en/agent-sdk/hooks"
+    }
+  ],
+  "sections": [
+    {
+      "heading": "What hooks are and when to use them",
+      "notes": [
+        "Hooks are user-defined handlers that Claude Code runs automatically at specific lifecycle points. They give **deterministic** control: the action always happens, instead of depending on the model choosing to do it.",
+        "Three cadences: per session (`SessionStart`, `SessionEnd`), per turn (`UserPromptSubmit`, `Stop`, `StopFailure`), and per tool call (`PreToolUse`, `PostToolUse`).",
+        "Use hooks to format code, block commands, send notifications, inject context, audit config changes and enforce project rules. Use CLAUDE.md for guidance the model should follow; use hooks for rules that must never be skipped.",
+        "For judgment-based decisions use `prompt` or `agent` hooks, which call a Claude model instead of running a script."
+      ],
+      "examTips": [
+        "If the requirement is 'must always happen' or 'must never happen', the answer is a hook (or a permission rule), not a CLAUDE.md instruction.",
+        "Hooks run arbitrary commands with your user permissions, so they are both powerful and a security surface."
+      ],
+      "source": "https://code.claude.com/docs/en/hooks-guide"
+    },
+    {
+      "heading": "Hook events catalog",
+      "notes": [
+        "Core events: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PostToolUseFailure`, `Notification`, `SubagentStart`, `SubagentStop`, `Stop`, `PreCompact`, `SessionEnd`.",
+        "Newer events in the current reference: `Setup`, `UserPromptExpansion`, `PermissionDenied`, `PostToolBatch`, `MessageDisplay`, `TaskCreated`, `TaskCompleted`, `StopFailure`, `TeammateIdle`, `InstructionsLoaded`, `ConfigChange`, `CwdChanged`, `DirectoryAdded`, `FileChanged`, `WorktreeCreate`, `WorktreeRemove`, `PostCompact`, `PreModelSwitch`, `PostModelSwitch`, `Elicitation`, `ElicitationResult`.",
+        "`PreToolUse` fires before a tool call and can block it. `PostToolUse` fires after success; `PostToolUseFailure` after a failed call. `Stop` fires when Claude finishes responding; `SubagentStop` when a subagent finishes.",
+        "`Notification` fires when Claude Code sends a notification (permission prompt, idle prompt, auth success and more). `PreCompact` runs before context compaction (matcher `manual` or `auto`).",
+        "`SessionStart` matches `startup`, `resume`, `clear`, `compact`, `fork`. `SessionEnd` matches reasons such as `clear`, `resume`, `logout`, `prompt_input_exit`, `other`."
+      ],
+      "examTips": [
+        "Know which events can block: PreToolUse, UserPromptSubmit, Stop, SubagentStop, PreCompact, TaskCreated/TaskCompleted, ConfigChange. PostToolUse cannot undo a tool that already ran.",
+        "SessionStart with matcher `compact` is the canonical way to re-inject context after compaction.",
+        "Event names are case-sensitive: `PreToolUse`, not `preToolUse`."
+      ],
+      "source": "https://code.claude.com/docs/en/hooks"
+    },
+    {
+      "heading": "Configuration in settings.json",
+      "notes": [
+        "Structure has three levels: **event -> matcher group -> hook handlers**. Handlers go in a `hooks` array inside each matcher group.",
+        "Locations: `~/.claude/settings.json` (all projects), `.claude/settings.json` (project, committable), `.claude/settings.local.json` (project, gitignored), managed policy settings, plugin `hooks/hooks.json`, and skill or subagent frontmatter. Hooks from different levels merge.",
+        "Common handler fields: `type`, `if` (permission-rule syntax such as `Bash(git *)`, tool events only), `timeout` (seconds), `statusMessage`, `once` (skill frontmatter only), `onFailure` (`block` makes failure or timeout block the action).",
+        "Defaults for timeout: 600s for command/http/mcp_tool, 30s for prompt, 60s for agent. `UserPromptSubmit` defaults to 30s; `SessionEnd` has a short 1.5s budget by default.",
+        "Hooks matching the same event run in parallel. Use `/hooks` to browse configured hooks (read-only)."
+      ],
+      "examTips": [
+        "Each event is a key inside ONE `hooks` object; add new events as siblings, never overwrite the whole object.",
+        "Put team-shared hooks in `.claude/settings.json`; personal ones in `settings.local.json` or `~/.claude/settings.json`.",
+        "The `if` field is best-effort; do not rely on it for hard enforcement."
+      ],
+      "source": "https://code.claude.com/docs/en/hooks",
+      "example": {
+        "title": "Hooks block in .claude/settings.json",
+        "language": "json",
+        "code": "{\n  \"hooks\": {\n    \"PreToolUse\": [\n      {\n        \"matcher\": \"Edit|Write\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"\\\"$CLAUDE_PROJECT_DIR\\\"/.claude/hooks/protect-files.sh\"\n          }\n        ]\n      }\n    ],\n    \"PostToolUse\": [\n      {\n        \"matcher\": \"Edit|Write\",\n        \"hooks\": [{ \"type\": \"command\", \"command\": \"jq -r '.tool_input.file_path' | xargs npx prettier --write\" }]\n      }\n    ]\n  }\n}"
+      }
+    },
+    {
+      "heading": "Matchers",
+      "notes": [
+        "A matcher filters when a group runs. `\"*\"`, `\"\"` or omitted matches everything.",
+        "If the matcher contains only letters, digits, `_`, `-`, spaces, `,` and `|`, it is an exact match or a list (`Edit|Write`). Anything else is treated as an unanchored JavaScript regex (`mcp__memory__.*`, `^Notebook`).",
+        "What the matcher filters on depends on the event: tool name for PreToolUse/PostToolUse/PermissionRequest; session source for SessionStart; notification type for Notification; agent type for SubagentStart/SubagentStop; trigger (`manual`/`auto`) for PreCompact; filenames for FileChanged.",
+        "`UserPromptSubmit`, `Stop`, `PostToolBatch`, `TaskCreated` and others have no matcher support; a matcher on them is silently ignored.",
+        "MCP tools are named `mcp__<server>__<tool>`, so match them with a regex like `mcp__github__.*`.",
+        "Matchers match tool names only, never file paths or arguments. To filter by path, inspect `tool_input.file_path` in the script."
+      ],
+      "examTips": [
+        "Trap: a `Write|Edit` matcher does not catch writes made through `Bash` (e.g. `echo > .env`). Protect files comprehensively with sandboxing or permission rules too.",
+        "Empty matcher on Notification fires on all notification types; use `permission_prompt` or `idle_prompt` to narrow."
+      ],
+      "source": "https://code.claude.com/docs/en/hooks"
+    },
+    {
+      "heading": "Hook input: JSON on stdin",
+      "notes": [
+        "Command hooks receive one JSON object on stdin (HTTP hooks receive it as POST body; prompt hooks see it via `$ARGUMENTS`).",
+        "Common fields: `session_id`, `transcript_path`, `cwd`, `permission_mode` (`default`, `plan`, `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions`), `hook_event_name`, plus `agent_id`/`agent_type` inside subagents.",
+        "Tool events add `tool_name`, `tool_input`, `tool_use_id`. `PostToolUse` also adds `tool_response`. `UserPromptSubmit` adds `prompt`. `SessionStart` adds `source`. Stop events add `stop_hook_active`. `SubagentStop` adds `agent_transcript_path` and `last_assistant_message`. `PreCompact` adds `trigger` and `custom_instructions`.",
+        "Bash `tool_input` has `command`, optional `description`, `timeout`, `run_in_background`."
+      ],
+      "examTips": [
+        "Scripts parse stdin with `jq` (e.g. `jq -r '.tool_input.command'`); a missing `jq` is a common failure cause.",
+        "`tool_use_id` correlates PreToolUse with PostToolUse for the same call."
+      ],
+      "source": "https://code.claude.com/docs/en/hooks",
+      "example": {
+        "title": "PreToolUse input for a Bash call",
+        "language": "json",
+        "code": "{\n  \"session_id\": \"abc123\",\n  \"cwd\": \"/home/user/my-project\",\n  \"permission_mode\": \"default\",\n  \"hook_event_name\": \"PreToolUse\",\n  \"tool_name\": \"Bash\",\n  \"tool_input\": { \"command\": \"npm test\", \"timeout\": 120000 },\n  \"tool_use_id\": \"toolu_01ABC123...\"\n}"
+      }
+    },
+    {
+      "heading": "Exit code semantics",
+      "notes": [
+        "**Exit 0** = success. Stdout is parsed as JSON if it is a single JSON object. For `UserPromptSubmit`, `UserPromptExpansion`, `SessionStart` and `PostModelSwitch`, plain stdout is added as context for Claude. Stderr is not shown to Claude.",
+        "**Exit 2** = blocking error. Stderr becomes the reason fed back; on blockable events the action stops, and JSON on stdout is ignored.",
+        "**Any other code (including 1)** = non-blocking error: a hook error notice appears and execution continues (unless `onFailure: \"block\"`).",
+        "Exit 2 per event: PreToolUse blocks the tool call; UserPromptSubmit blocks and discards the prompt; Stop/SubagentStop/TeammateIdle prevent stopping so Claude keeps working; PreCompact blocks compaction; TaskCreated/TaskCompleted roll back; PostToolUse/PostToolUseFailure only show stderr to Claude (tool already ran).",
+        "Exit 2 is ignored (or shows stderr to the user only) for Notification, SessionStart, SessionEnd, PostCompact, CwdChanged, FileChanged, StopFailure, InstructionsLoaded. `PermissionRequest` ignores exit 2; use its `decision` object."
+      ],
+      "examTips": [
+        "Classic trap: `exit 1` is NOT a block. Policy enforcement needs `exit 2`.",
+        "When you use exit 2, put the reason on stderr; stdout JSON is not processed on exit 2.",
+        "A timed-out PreToolUse command hook does not block by default; set `onFailure: \"block\"` if the hook is a gate."
+      ],
+      "source": "https://code.claude.com/docs/en/hooks",
+      "example": {
+        "title": "Blocking script using exit 2",
+        "language": "bash",
+        "code": "#!/bin/bash\ninput=$(cat)\ncommand=$(jq -r '.tool_input.command' <<<\"$input\")\nif [[ \"$command\" == rm* ]]; then\n  echo \"Blocked: rm commands are not allowed\" >&2\n  exit 2\nfi\nexit 0"
+      }
+    },
+    {
+      "heading": "JSON output and decision control",
+      "notes": [
+        "For richer control, exit 0 and print ONE JSON object on stdout with nothing else (stray text such as shell-profile echoes breaks parsing and the JSON is silently ignored).",
+        "Universal fields: `continue` (false stops Claude entirely and overrides event decisions), `stopReason` (shown to user when continue is false), `systemMessage` (warning shown to the user), `suppressOutput`.",
+        "Top-level `decision: \"block\"` plus `reason` is used by UserPromptSubmit, PostToolUse, PostToolUseFailure, Stop, SubagentStop, ConfigChange, PreCompact and similar. The only value is `block`; omit it to allow.",
+        "`PreToolUse` uses `hookSpecificOutput` (with `hookEventName`): `permissionDecision` = `allow`, `deny`, `ask` or `defer`; `permissionDecisionReason`; `updatedInput` rewrites tool arguments.",
+        "`PermissionRequest` uses `hookSpecificOutput.decision.behavior` = `allow` or `deny` (optionally `updatedInput`).",
+        "`PostToolUse` can add `additionalContext` or replace output with `updatedToolOutput`. `additionalContext` is injected as context and capped at 10,000 characters; phrase it as facts, not commands.",
+        "When several PreToolUse hooks disagree, precedence is deny > defer > ask > allow."
+      ],
+      "examTips": [
+        "Placement matters: `permissionDecision` belongs inside `hookSpecificOutput`, not at top level; misplaced fields have no effect and show no error.",
+        "`continue: false` beats any other decision field. `decision: \"block\"` on Stop means 'do not stop', not 'abort'.",
+        "Old PreToolUse top-level `decision` style is superseded by `permissionDecision`."
+      ],
+      "source": "https://code.claude.com/docs/en/hooks",
+      "example": {
+        "title": "Deny a tool call with JSON",
+        "language": "json",
+        "code": "{\n  \"hookSpecificOutput\": {\n    \"hookEventName\": \"PreToolUse\",\n    \"permissionDecision\": \"deny\",\n    \"permissionDecisionReason\": \"Database writes are not allowed\"\n  }\n}"
+      }
+    },
+    {
+      "heading": "Command, prompt, agent, HTTP and MCP hook types",
+      "notes": [
+        "`command`: runs a shell command; input on stdin, result via exit code and stdout. With `args` set it runs directly without a shell (exec form, avoids quoting issues); without `args` it runs through a shell and supports pipes.",
+        "`prompt`: a single-turn model evaluation. Your prompt (with `$ARGUMENTS` for hook input) goes to a Claude model (optionally set `model`) which must return JSON `{\"ok\": true}` or `{\"ok\": false, \"reason\": \"...\"}`. On Stop/SubagentStop, `ok:false` feeds the reason back so Claude keeps working.",
+        "`agent` (experimental): spawns a subagent that can read files and use tools to verify a condition before deciding. Slower than prompt, for checks that need inspection.",
+        "`http`: POSTs the event JSON to a URL; 2xx JSON body is the result, non-2xx is non-blocking. Env vars in headers are interpolated only if listed in `allowedEnvVars`.",
+        "`mcp_tool`: calls a tool on a configured MCP server with `input` that can substitute fields like `${tool_input.file_path}`.",
+        "Choose command for deterministic rules, prompt for judgment on the input alone, agent when verification needs files or commands."
+      ],
+      "examTips": [
+        "Prompt hooks return `ok`/`reason`, not exit codes or `permissionDecision`.",
+        "Prompt hooks cannot read files or run tools; agent hooks can."
+      ],
+      "source": "https://code.claude.com/docs/en/hooks-guide",
+      "example": {
+        "title": "Prompt hook on Stop",
+        "language": "json",
+        "code": "{\n  \"hooks\": {\n    \"Stop\": [\n      {\n        \"hooks\": [\n          {\n            \"type\": \"prompt\",\n            \"prompt\": \"Check if all tasks are complete. If not, respond with {\\\"ok\\\": false, \\\"reason\\\": \\\"what remains to be done\\\"}.\"\n          }\n        ]\n      }\n    ]\n  }\n}"
+      }
+    },
+    {
+      "heading": "Environment variables and paths",
+      "notes": [
+        "`CLAUDE_PROJECT_DIR` is the project root where the session started; use it to reference scripts regardless of the current working directory. It stays fixed even in a worktree.",
+        "Quote it in shell form: `\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/script.sh`, since the path may contain spaces. In exec form use `${CLAUDE_PROJECT_DIR}` in `command`.",
+        "Plugins use `CLAUDE_PLUGIN_ROOT` (install dir) and `CLAUDE_PLUGIN_DATA` (persistent data).",
+        "`CLAUDE_ENV_FILE` (SessionStart, Setup, CwdChanged, FileChanged only): append `export` lines with `>>` to persist environment variables for later Bash commands.",
+        "Hooks inherit the parent environment. Scripts must be executable (`chmod +x`)."
+      ],
+      "examTips": [
+        "Relative script paths break when Claude `cd`s; use `$CLAUDE_PROJECT_DIR`.",
+        "Use `>>` not `>` with CLAUDE_ENV_FILE so other hooks' variables survive (though the guide's direnv example overwrites deliberately)."
+      ],
+      "source": "https://code.claude.com/docs/en/hooks",
+      "example": {
+        "title": "Persist env vars from SessionStart",
+        "language": "bash",
+        "code": "if [ -n \"$CLAUDE_ENV_FILE\" ]; then\n  echo 'export NODE_ENV=production' >> \"$CLAUDE_ENV_FILE\"\nfi\nexit 0"
+      }
+    },
+    {
+      "heading": "Practical examples",
+      "notes": [
+        "Notification: run `osascript`/`notify-send` on the `Notification` event to be alerted when Claude needs input; narrow with `permission_prompt` or `idle_prompt`.",
+        "Auto-format: `PostToolUse` with `Edit|Write` pipes `.tool_input.file_path` to Prettier.",
+        "Protect files: `PreToolUse` on `Edit|Write` script that exits 2 when the path matches `.env`, `package-lock.json` or `.git/`; Claude sees the stderr message and adapts.",
+        "Re-inject context after compaction: `SessionStart` with matcher `compact` echoing conventions to stdout.",
+        "Audit config changes: `ConfigChange` hook appends a JSON line to a log; exit 2 would block the change.",
+        "Reload environment per directory: `SessionStart` and `CwdChanged` hooks writing `direnv export bash` to `CLAUDE_ENV_FILE`.",
+        "Force continued work: a `Stop` hook (command or prompt) that blocks until tests pass, guarded by `stop_hook_active`."
+      ],
+      "examTips": [
+        "Formatting belongs in PostToolUse (after the edit); protection belongs in PreToolUse (before).",
+        "A successful PostToolUse hook shows nothing in the conversation; verify via the result or debug logs."
+      ],
+      "source": "https://code.claude.com/docs/en/hooks-guide",
+      "example": {
+        "title": "Protect files script (.claude/hooks/protect-files.sh)",
+        "language": "bash",
+        "code": "#!/bin/bash\nINPUT=$(cat)\nFILE_PATH=$(echo \"$INPUT\" | jq -r '.tool_input.file_path // empty')\nFILE_PATH=\"${FILE_PATH//\\\\//}\"\nPROTECTED_PATTERNS=(\".env\" \"package-lock.json\" \".git/\")\nfor pattern in \"${PROTECTED_PATTERNS[@]}\"; do\n  if [[ \"$FILE_PATH\" == *\"$pattern\"* ]]; then\n    echo \"Blocked: $FILE_PATH matches protected pattern '$pattern'\" >&2\n    exit 2\n  fi\ndone\nexit 0"
+      }
+    },
+    {
+      "heading": "Stop hooks and loop prevention",
+      "notes": [
+        "`Stop` and `SubagentStop` hooks can stop Claude from finishing: exit 2 (stderr is the reason) or JSON `{\"decision\":\"block\",\"reason\":\"...\"}`. The reason tells Claude why to continue.",
+        "The input carries `stop_hook_active`, which is true when Claude is already continuing because of a Stop hook. Check it and exit 0 to avoid infinite loops.",
+        "Claude Code overrides a Stop hook after it blocks eight times in a row with no tool call in between; raise the cap with `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP`.",
+        "`Stop` does not fire on user interrupts, and API-error turn endings fire `StopFailure` instead."
+      ],
+      "examTips": [
+        "The documented fix for a Stop hook that runs forever is checking `stop_hook_active`.",
+        "SubagentStop applies to Task/subagent completion, Stop to the main agent."
+      ],
+      "source": "https://code.claude.com/docs/en/hooks-guide",
+      "example": {
+        "title": "Guard against Stop loops",
+        "language": "bash",
+        "code": "#!/bin/bash\nINPUT=$(cat)\nif [ \"$(echo \"$INPUT\" | jq -r '.stop_hook_active')\" = \"true\" ]; then\n  exit 0  # Allow Claude to stop\nfi\n# ... rest of your hook logic"
+      }
+    },
+    {
+      "heading": "Security considerations",
+      "notes": [
+        "Hooks are arbitrary shell commands run automatically with your permissions. Review project-level hooks before trusting a repository.",
+        "Project hooks follow the workspace trust dialog; `-p` runs do not count as accepting it.",
+        "Admins can set `allowManagedHooksOnly` to block user, project, local and plugin hooks; users cannot use `disableAllHooks` to disable managed hooks. `allowedHttpHookUrls` and `httpHookAllowedEnvVars` restrict HTTP hooks.",
+        "`if` is best-effort; use the permission system for hard allow/deny rules.",
+        "Do not pass untrusted text through `additionalContext` (prompt-injection risk). Validate and quote inputs in scripts, avoid `eval`, and use absolute or `$CLAUDE_PROJECT_DIR` paths.",
+        "A hook `allow` does not override deny rules; deny and ask rules are still evaluated."
+      ],
+      "examTips": [
+        "Exam trap: `allow` from a hook is not a bypass of settings deny rules.",
+        "For a gating hook, configure `onFailure: \"block\"` so a crash or timeout fails closed."
+      ],
+      "source": "https://code.claude.com/docs/en/hooks"
+    },
+    {
+      "heading": "Debugging hooks",
+      "notes": [
+        "`/hooks` lists configured hooks with source and full command (read-only).",
+        "`claude --debug` or `/debug` writes hook stdout and stderr to the log. Newer versions log lines like `Hooks: PostToolUse:Write [...] finished with status 0 (31ms)`.",
+        "Non-blocking failures show a hook error notice with the first line of stderr.",
+        "Common causes: wrong script path, script not executable, `jq` missing, exit 1 instead of 2, stray stdout (shell profile `echo`) breaking JSON, field at the wrong JSON level, wrong event name case, matcher not matching.",
+        "Test by running the script by hand with sample JSON piped in: `echo '{...}' | ./hook.sh; echo $?`."
+      ],
+      "examTips": [
+        "Hook JSON silently ignored while exit code is 0 usually means stdout was not pure JSON or a field is misplaced.",
+        "Hooks may not fire if the agent reaches `max_turns` before they can run."
+      ],
+      "source": "https://code.claude.com/docs/en/hooks-guide"
+    },
+    {
+      "heading": "Hooks in the Agent SDK",
+      "notes": [
+        "SDK hooks are callback functions passed in `options.hooks` (TypeScript) or `ClaudeAgentOptions(hooks=...)` (Python) as `HookMatcher(matcher=..., hooks=[callback])`. Shell hooks from settings also load when the matching setting source is enabled.",
+        "Callback signature: `(input_data, tool_use_id, context)`; return `{}` to allow, or an object with `systemMessage`, `continue`, and `hookSpecificOutput` using the same JSON format as shell hooks.",
+        "Python supports PreToolUse, PostToolUse, PostToolUseFailure, UserPromptSubmit, Stop, SubagentStart, SubagentStop, PreCompact, PermissionRequest, Notification. SessionStart, SessionEnd and many newer events are TypeScript-only (Python can use them as shell hooks in settings).",
+        "Return `{async: true}` (Python `async_`) for fire-and-forget side effects; async output cannot block or modify.",
+        "A throwing callback by default lets the action proceed; set `onFailure: \"block\"` (`on_failure=\"block\"` in Python) to fail closed. Multiple matching hooks run in parallel; the most restrictive decision wins.",
+        "To rewrite input, return `updatedInput` inside `hookSpecificOutput` with `permissionDecision: \"allow\"` (or `ask`); `defer` drops updatedInput."
+      ],
+      "examTips": [
+        "SDK callbacks use dict/object returns, not exit codes.",
+        "A `Write|Edit` matcher does not stop Bash from writing the same file."
+      ],
+      "source": "https://code.claude.com/docs/en/agent-sdk/hooks",
+      "example": {
+        "title": "SDK hook blocking .env writes (Python)",
+        "language": "python",
+        "code": "async def protect_env_files(input_data, tool_use_id, context):\n    file_path = input_data[\"tool_input\"].get(\"file_path\", \"\")\n    if file_path.split(\"/\")[-1].lower() == \".env\":\n        return {\n            \"hookSpecificOutput\": {\n                \"hookEventName\": input_data[\"hook_event_name\"],\n                \"permissionDecision\": \"deny\",\n                \"permissionDecisionReason\": \"Cannot modify .env files\",\n            }\n        }\n    return {}\n\noptions = ClaudeAgentOptions(\n    hooks={\"PreToolUse\": [HookMatcher(matcher=\"Write|Edit\", hooks=[protect_env_files])]}\n)"
+      }
+    }
+  ],
+  "keyTakeaways": [
+    "Hooks are deterministic; CLAUDE.md is advisory.",
+    "Config nests event -> matcher group -> hooks array, in user, project, local, managed, plugin or frontmatter locations.",
+    "Exit 0 = success (stdout parsed as JSON), exit 2 = blocking error (stderr is the reason), any other code = non-blocking error.",
+    "Exit 1 does not block; use exit 2 for policy enforcement.",
+    "PreToolUse is the event for blocking or rewriting tool calls; PostToolUse cannot undo.",
+    "permissionDecision (allow/deny/ask/defer) lives inside hookSpecificOutput; deny > defer > ask > allow.",
+    "continue:false stops Claude entirely and overrides other decisions.",
+    "Matchers filter tool names (or source/type per event), are exact/list or regex, and never match file paths.",
+    "Stop hooks must check stop_hook_active to avoid loops; Claude Code caps consecutive blocks at eight.",
+    "Hook types: command, http, mcp_tool, prompt (ok/reason), agent (experimental, can use tools).",
+    "Use $CLAUDE_PROJECT_DIR for script paths; CLAUDE_ENV_FILE persists env vars from SessionStart/CwdChanged/FileChanged.",
+    "Debug with /hooks and claude --debug; stdout must be pure JSON.",
+    "SDK hooks are callbacks (input, tool_use_id, context) returning {} or JSON; use onFailure block to fail closed."
+  ],
+  "glossary": [
+    {
+      "term": "Hook",
+      "definition": "A handler Claude Code runs automatically at a lifecycle event."
+    },
+    {
+      "term": "Matcher",
+      "definition": "A pattern (exact, list or regex) selecting which tool, source or type triggers a hook group."
+    },
+    {
+      "term": "PreToolUse",
+      "definition": "Event before a tool call; can allow, deny, ask, defer or modify input."
+    },
+    {
+      "term": "PostToolUse",
+      "definition": "Event after a tool succeeds; can add context or replace output but not undo."
+    },
+    {
+      "term": "Exit code 2",
+      "definition": "Blocking error; stderr is delivered as the reason and the action stops on blockable events."
+    },
+    {
+      "term": "hookSpecificOutput",
+      "definition": "JSON object holding event-specific fields such as permissionDecision and additionalContext; requires hookEventName."
+    },
+    {
+      "term": "permissionDecision",
+      "definition": "PreToolUse result: allow, deny, ask or defer."
+    },
+    {
+      "term": "updatedInput",
+      "definition": "Field that rewrites tool arguments before execution."
+    },
+    {
+      "term": "stop_hook_active",
+      "definition": "Input flag true when Claude is already continuing due to a Stop hook; used to prevent loops."
+    },
+    {
+      "term": "CLAUDE_PROJECT_DIR",
+      "definition": "Environment variable giving the project root for referencing hook scripts."
+    },
+    {
+      "term": "CLAUDE_ENV_FILE",
+      "definition": "File path where hooks append export lines to persist environment variables."
+    },
+    {
+      "term": "Prompt hook",
+      "definition": "Hook that asks a Claude model to return {ok, reason} instead of running a script."
+    },
+    {
+      "term": "Agent hook",
+      "definition": "Experimental hook that spawns a subagent with tools to verify a condition."
+    },
+    {
+      "term": "onFailure",
+      "definition": "Setting; 'block' makes a failed or timed-out hook block the action."
+    }
+  ],
+  "quiz": [
+    {
+      "q": "A team wants every file Claude edits to be auto-formatted with Prettier, with no reliance on the model remembering. Which configuration fits best?",
+      "options": [
+        "A PostToolUse hook with matcher Edit|Write running Prettier on tool_input.file_path",
+        "A CLAUDE.md line asking Claude to run Prettier after edits",
+        "A PreToolUse hook with matcher Bash running Prettier",
+        "A Notification hook that runs Prettier"
+      ],
+      "answer": 0,
+      "explanation": "Hooks give deterministic behavior. PostToolUse runs after the edit succeeds, and Edit|Write targets file-editing tools. CLAUDE.md is advisory, Bash matcher misses edits, Notification is unrelated.",
+      "source": "https://code.claude.com/docs/en/hooks-guide"
+    },
+    {
+      "q": "A PreToolUse hook script detects a forbidden command and runs `exit 1` after printing a message to stderr. What happens?",
+      "options": [
+        "The tool call is blocked and Claude sees the message",
+        "The whole session terminates",
+        "The tool call proceeds; a non-blocking hook error is shown",
+        "The tool call is deferred to the user"
+      ],
+      "answer": 2,
+      "explanation": "Only exit 2 blocks. Any other non-zero code is a non-blocking error and the action proceeds.",
+      "source": "https://code.claude.com/docs/en/hooks"
+    },
+    {
+      "q": "You need to block a prompt before it reaches Claude, for example when it contains a secret. Which event and mechanism is correct?",
+      "options": [
+        "PreToolUse with permissionDecision deny",
+        "Notification with exit 2",
+        "SessionStart with matcher startup",
+        "UserPromptSubmit exiting 2 or returning decision block"
+      ],
+      "answer": 3,
+      "explanation": "UserPromptSubmit runs before Claude processes the prompt; exit 2 or decision:block stops it. PreToolUse concerns tool calls; Notification ignores exit 2.",
+      "source": "https://code.claude.com/docs/en/hooks"
+    },
+    {
+      "q": "A Stop hook keeps blocking Claude from finishing and the session seems stuck repeating. What is the documented correct fix in the script?",
+      "options": [
+        "Switch to exit 1",
+        "Read stop_hook_active from stdin JSON and exit 0 when it is true",
+        "Remove the matcher",
+        "Set continue to true"
+      ],
+      "answer": 1,
+      "explanation": "stop_hook_active indicates Claude is already continuing due to a Stop hook; exiting 0 then lets it stop. Claude Code also caps consecutive blocks at eight by default.",
+      "source": "https://code.claude.com/docs/en/hooks-guide"
+    },
+    {
+      "q": "After compaction, Claude forgets project conventions. Which hook re-injects them most directly?",
+      "options": [
+        "SessionStart with matcher compact that prints reminder text to stdout",
+        "PreCompact with exit 2",
+        "PostToolUse with matcher compact",
+        "SessionEnd with reason compact"
+      ],
+      "answer": 0,
+      "explanation": "SessionStart fires after compaction with source compact, and plain stdout from SessionStart is added to context. PreCompact exit 2 would block compaction instead.",
+      "source": "https://code.claude.com/docs/en/hooks-guide"
+    },
+    {
+      "q": "Which JSON output correctly denies a Bash tool call from a PreToolUse command hook?",
+      "options": [
+        "{\"permissionDecision\": \"deny\"}",
+        "{\"decision\": \"deny\"}",
+        "{\"hookSpecificOutput\": {\"hookEventName\": \"PreToolUse\", \"permissionDecision\": \"deny\", \"permissionDecisionReason\": \"...\"}}",
+        "{\"continue\": \"deny\"}"
+      ],
+      "answer": 2,
+      "explanation": "permissionDecision must live inside hookSpecificOutput with hookEventName. A top-level field is silently ignored; decision only takes block and continue is boolean.",
+      "source": "https://code.claude.com/docs/en/hooks"
+    },
+    {
+      "q": "Your hook script prints valid JSON with a block decision and exits 0, but nothing is blocked and there is no error. The developer's ~/.bashrc contains an unconditional echo. What is the likely cause?",
+      "options": [
+        "Hooks cannot block on exit 0",
+        "The matcher is regex-only",
+        "jq is installed twice",
+        "The echo output precedes the JSON so stdout is treated as plain text"
+      ],
+      "answer": 3,
+      "explanation": "Output must be only a JSON object starting with {. Profile output in front causes the JSON to be ignored, and exit 0 shows no error.",
+      "source": "https://code.claude.com/docs/en/hooks-guide"
+    },
+    {
+      "q": "A hook with matcher `Write|Edit` is meant to keep Claude away from `.env`. Claude instead runs `echo SECRET=1 > .env` via Bash. What does this show?",
+      "options": [
+        "Matchers are case-insensitive",
+        "The matcher only covers Write and Edit tools, so Bash writes bypass it",
+        "PostToolUse should be used",
+        "Hooks do not support Bash"
+      ],
+      "answer": 1,
+      "explanation": "Matchers filter by tool name. Also match Bash and inspect the command, or use sandboxing and permission rules.",
+      "source": "https://code.claude.com/docs/en/agent-sdk/hooks"
+    },
+    {
+      "q": "You need a hook that decides whether the work is really finished by judging Claude's transcript context with a model, without scripting rules. Which type and response?",
+      "options": [
+        "prompt hook returning {\"ok\": false, \"reason\": ...}",
+        "command hook returning exit 2",
+        "http hook with 404",
+        "mcp_tool hook returning stdout"
+      ],
+      "answer": 0,
+      "explanation": "Prompt hooks send the input to a Claude model that returns ok true/false with a reason; on Stop, ok:false makes Claude continue. An agent hook is the choice when files or commands must be inspected.",
+      "source": "https://code.claude.com/docs/en/hooks-guide"
+    },
+    {
+      "q": "A hook script lives at .claude/hooks/check.sh and works when Claude is in the project root but fails after Claude cds into a subfolder. Best fix?",
+      "options": [
+        "Use ./.claude/hooks/check.sh",
+        "Copy the script into every folder",
+        "Reference it as \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/check.sh",
+        "Set matcher to *"
+      ],
+      "answer": 2,
+      "explanation": "CLAUDE_PROJECT_DIR is the stable project root, independent of the working directory. Relative paths break after cd.",
+      "source": "https://code.claude.com/docs/en/hooks"
+    },
+    {
+      "q": "In the Python Agent SDK, which statement about hooks is correct?",
+      "options": [
+        "Hooks are shell commands only",
+        "SessionStart callbacks are fully supported",
+        "Callbacks must exit with code 2 to deny",
+        "Hooks are async callbacks (input_data, tool_use_id, context) registered via HookMatcher in ClaudeAgentOptions; returning {} allows the action"
+      ],
+      "answer": 3,
+      "explanation": "SDK hooks are callbacks returning the same JSON structure as shell hooks. SessionStart/SessionEnd callbacks are TypeScript-only in the SDK; Python uses shell hooks in settings for them.",
+      "source": "https://code.claude.com/docs/en/agent-sdk/hooks"
+    },
+    {
+      "q": "An SDK PreToolUse guard callback raises an exception during a Bash policy check. By default what happens, and how do you fail closed?",
+      "options": [
+        "The call is always blocked; nothing to change",
+        "The action proceeds with a warning; set onFailure/on_failure to \"block\" on the matcher",
+        "The session ends; use continue true",
+        "The tool is deferred; use async"
+      ],
+      "answer": 1,
+      "explanation": "By default most events proceed when a callback fails. Setting onFailure block makes the failure block the action.",
+      "source": "https://code.claude.com/docs/en/agent-sdk/hooks"
+    },
+    {
+      "q": "Security review of a cloned repo: it contains .claude/settings.json with hooks. What is the correct concern and control?",
+      "options": [
+        "Hooks are arbitrary commands with your permissions; review them and rely on workspace trust, and admins can enforce allowManagedHooksOnly",
+        "Hooks are sandboxed so no concern",
+        "Only prompt hooks are dangerous",
+        "Hooks only run in -p mode"
+      ],
+      "answer": 0,
+      "explanation": "Hooks run shell commands automatically. Workspace trust gates project hooks, and managed policy can restrict hook sources.",
+      "source": "https://code.claude.com/docs/en/hooks"
+    },
+    {
+      "q": "A PostToolUse hook exits 2 after a Write completes. What is the effect?",
+      "options": [
+        "The write is rolled back",
+        "The session ends",
+        "Stderr is shown to Claude, but the tool already ran and is not undone",
+        "Nothing at all"
+      ],
+      "answer": 2,
+      "explanation": "PostToolUse runs after execution; exit 2 only surfaces stderr to Claude. To prevent an action, use PreToolUse.",
+      "source": "https://code.claude.com/docs/en/hooks"
+    }
+  ]
+}

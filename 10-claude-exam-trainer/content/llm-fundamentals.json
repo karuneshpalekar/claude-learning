@@ -1,0 +1,457 @@
+{
+  "slug": "llm-fundamentals",
+  "title": "LLM Fundamentals",
+  "overview": "This objective covers how large language models work and how Claude is built and behaves: tokens, the context window, how Claude is trained (pretraining, fine-tuning, RLHF, Constitutional AI), sampling controls, hallucinations, the stateless API, knowledge cutoffs, thinking, and core Anthropic vocabulary. The exam tests these because nearly every design decision (cost, latency, correctness, memory) follows from them. Expect scenario questions that ask you to diagnose a symptom, such as a bot that forgets earlier turns or invents facts, and pick the right fix.",
+  "sources": [
+    {"title": "Glossary", "url": "https://platform.claude.com/docs/en/about-claude/glossary"},
+    {"title": "Context windows", "url": "https://platform.claude.com/docs/en/build-with-claude/context-windows"},
+    {"title": "Thinking", "url": "https://platform.claude.com/docs/en/build-with-claude/thinking"},
+    {"title": "Extended thinking (legacy manual mode)", "url": "https://platform.claude.com/docs/en/build-with-claude/extended-thinking"},
+    {"title": "Messages API reference", "url": "https://platform.claude.com/docs/en/api/messages"},
+    {"title": "Handling stop reasons", "url": "https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons"},
+    {"title": "Reduce hallucinations", "url": "https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/reduce-hallucinations"},
+    {"title": "Models overview", "url": "https://platform.claude.com/docs/en/models/overview"},
+    {"title": "Claude's Constitution (Anthropic)", "url": "https://www.anthropic.com/news/claudes-constitution"}
+  ],
+  "sections": [
+    {
+      "heading": "What an LLM is",
+      "notes": [
+        "A **large language model (LLM)** is a model with a very large number of parameters, trained on vast amounts of text, that can generate text, answer questions, summarize, and more.",
+        "Claude is **not a bare language model**: it is a pretrained model that has been further fine-tuned (including with RLHF) to act as a helpful assistant.",
+        "An LLM generates output one token at a time, each token predicted from everything that came before it (the prompt plus tokens already generated)."
+      ],
+      "examTips": [
+        "If a question says a model 'looks things up', be skeptical: the model itself only has its weights and its context window. Retrieval happens in your application or via tools."
+      ],
+      "source": "https://platform.claude.com/docs/en/about-claude/glossary"
+    },
+    {
+      "heading": "Tokens",
+      "notes": [
+        "**Tokens** are the smallest units a model processes. They can be words, subwords, characters, or bytes. Text is encoded into tokens on input and decoded from tokens on output.",
+        "Larger tokens make training and inference more efficient; smaller tokens let the model handle rare or unseen words.",
+        "On earlier models a token is roughly 3.5 English characters. Claude 4.7 and later models use a newer tokenizer that produces about **30% more tokens for the same text**, so the same prompt costs more tokens and fills the window faster on newer models.",
+        "Token counts depend on the model and language, so use the **token counting API** with the exact model you plan to use rather than estimating by characters.",
+        "Billing, rate limits, `max_tokens`, and context size are all measured in tokens, not characters or words."
+      ],
+      "example": {
+        "title": "Count tokens before sending",
+        "language": "python",
+        "code": "import anthropic\nclient = anthropic.Anthropic()\n\ncount = client.messages.count_tokens(\n    model=\"claude-sonnet-5-5\",\n    system=\"You are a concise assistant.\",\n    messages=[{\"role\": \"user\", \"content\": \"Explain LLMs in plain English.\"}],\n)\nprint(count.input_tokens)  # estimate before you pay for the real call"
+      },
+      "examTips": [
+        "Never assume 1 token = 1 word. Exact counts come from the token counting API for the target model.",
+        "A tokenizer change between model generations changes token counts for identical text, which affects cost and context budgeting when you migrate."
+      ],
+      "source": "https://platform.claude.com/docs/en/about-claude/glossary"
+    },
+    {
+      "heading": "The context window",
+      "notes": [
+        "The **context window** is all the text the model can reference when generating a response, **including the response itself**. Think of it as working memory, distinct from the corpus the model was trained on.",
+        "Everything in the request counts: system prompt, every message (including tool results, images, documents), tool definitions, and the generated output including thinking.",
+        "Across turns, each user message and assistant reply accumulates; previous turns are preserved completely in API requests.",
+        "Current models (for example Claude Opus 5.5, Sonnet 5.5, Haiku 5.5, Fable 5.1) have a **1M-token** context window and up to **128k output tokens**; older models such as Sonnet 4.5 have 200k. Long-context requests are billed at standard pricing on most 1M models (Haiku 5.5 charges more above 100,000 prompt tokens).",
+        "More context is not automatically better: as token count grows, accuracy and recall degrade (**context rot**), so curating context matters as much as capacity.",
+        "If the input alone exceeds the window, the API returns a 400 `invalid_request_error` ('prompt is too long'). On Claude 4.5 and newer, if input plus `max_tokens` exceeds the window the request is accepted, and generation that hits the limit stops with `stop_reason: \"model_context_window_exceeded\"`.",
+        "Tools for managing long conversations: **server-side compaction** (summarizes earlier turns, beta), **context editing** (clear old tool results or thinking blocks), prompt caching (changes cost, not whether tokens count), and the token counting API."
+      ],
+      "example": {
+        "title": "What counts toward the window in one request",
+        "language": "text",
+        "code": "context used = system prompt\n             + tool definitions\n             + all prior messages (incl. tool_result, images, docs)\n             + current user message\n             + generated output (text + thinking)\n\nCached prefix tokens (cache_read / cache_creation) STILL count."
+      },
+      "examTips": [
+        "Prompt caching reduces price and latency for repeated prefixes; it does NOT shrink the context window usage.",
+        "The window includes output. A huge prompt plus a huge max_tokens can leave no room to finish.",
+        "Context window is working memory per request; it is not the training data and not persistent storage."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/context-windows"
+    },
+    {
+      "heading": "Pretraining",
+      "notes": [
+        "**Pretraining** is the initial training on a large unlabeled text corpus. Claude's underlying models are autoregressive: they learn to predict the next token given the preceding text.",
+        "A pretrained-only model is not inherently good at answering questions or following instructions; eliciting good behavior from it takes heavy prompt engineering.",
+        "Pretraining is where most world knowledge is acquired, which is why knowledge has a cutoff date (see the knowledge cutoff section)."
+      ],
+      "examTips": [
+        "Pretraining = predict next token on unlabeled text. It does not by itself make the model an assistant; fine-tuning and RLHF do that."
+      ],
+      "source": "https://platform.claude.com/docs/en/about-claude/glossary"
+    },
+    {
+      "heading": "Fine-tuning",
+      "notes": [
+        "**Fine-tuning** further trains a pretrained model on additional data so it mimics the patterns of that dataset. It can adapt a model to a domain, task, or style.",
+        "Claude has already been fine-tuned to be a helpful assistant.",
+        "The Claude API does not currently offer self-serve fine-tuning (the glossary says to ask your Anthropic contact if interested). For most customization, use prompting, retrieval, or tools instead."
+      ],
+      "examTips": [
+        "When a scenario needs the model to use fresh or private facts, the answer is RAG or tools, not fine-tuning. Fine-tuning is also not self-serve on the Claude API."
+      ],
+      "source": "https://platform.claude.com/docs/en/about-claude/glossary"
+    },
+    {
+      "heading": "RLHF, Constitutional AI, and HHH",
+      "notes": [
+        "**RLHF (reinforcement learning from human feedback)** trains a pretrained model toward human preferences. Humans rank two or more example outputs, and reinforcement learning pushes the model toward outputs like the higher-ranked ones. Claude was trained with RLHF to be more helpful.",
+        "**Constitutional AI** trains a model to follow a written set of principles using AI-generated feedback in place of much of the human feedback. In the supervised phase the model critiques and revises its own responses against a principle. In the reinforcement phase an AI judges which of two responses better fits the principles, and that judgment is the reward signal.",
+        "Benefits of Constitutional AI: less reliance on human labelers (who otherwise review disturbing content), better scaling, and values that are written down and therefore easier to inspect and adjust.",
+        "**HHH (helpful, honest, harmless)** is the research framework informing how Claude is trained. Honest includes not hallucinating or confabulating and acknowledging uncertainty; harmless includes politely refusing dangerous or unethical requests."
+      ],
+      "examTips": [
+        "RLHF = human rankings as the signal. Constitutional AI = written principles plus AI feedback as the signal (RL from AI feedback).",
+        "HHH is a research framework, not the product tagline."
+      ],
+      "source": "https://www.anthropic.com/news/claudes-constitution"
+    },
+    {
+      "heading": "Sampling parameters",
+      "notes": [
+        "**Temperature** controls randomness. Lower values give more conservative, probable outputs; higher values give more varied, creative ones. Even at temperature 0 results are **not guaranteed deterministic**, on first-party or third-party cloud inference.",
+        "**top_p** (nucleus sampling) and **top_k** restrict which candidate tokens can be sampled. Typically adjust temperature or top_p, not both.",
+        "**max_tokens** (required) caps generated tokens for the response; the model may stop earlier. If it is hit, `stop_reason` is `max_tokens`. Thinking tokens count toward it.",
+        "**stop_sequences** are custom strings that end generation; when matched, `stop_reason` is `stop_sequence` and the `stop_sequence` field holds the match.",
+        "On newer models the sampling knobs are being removed: starting with Claude Opus 4.7 (also Opus 4.8, Sonnet 5, Sonnet 5.5, and others), setting `temperature`, `top_p`, or `top_k` to a non-default value returns a **400 error**. With API version 2026-10-21 these parameters return a 400 even at default values. Guide tone and variety through the prompt instead. Older models such as Sonnet 4.6 still accept them (under the earlier API version)."
+      ],
+      "example": {
+        "title": "Older-model request with sampling, and the newer-model form",
+        "language": "python",
+        "code": "# Older model (e.g. claude-sonnet-4-6) on the 2023-06-01 API version: sampling params accepted\nclient.messages.create(\n    model=\"claude-sonnet-4-6\",\n    max_tokens=512,\n    temperature=0.2,\n    stop_sequences=[\"END\"],\n    messages=[{\"role\": \"user\", \"content\": \"Classify: 'Great product!'\"}],\n)\n\n# Newer model (e.g. claude-sonnet-5-5): omit temperature/top_p/top_k entirely\nclient.messages.create(\n    model=\"claude-sonnet-5-5\",\n    max_tokens=512,\n    stop_sequences=[\"END\"],\n    messages=[{\"role\": \"user\", \"content\": \"Classify: 'Great product!' Answer in one word.\"}],\n)"
+      },
+      "examTips": [
+        "Low temperature for extraction, classification, and consistency; higher for brainstorming. But temperature 0 never guarantees identical outputs.",
+        "If a request to a current model fails with a 400 after you added temperature or top_k, the fix is to remove the parameter, not to retry.",
+        "max_tokens is a ceiling, not a target: the model can finish earlier."
+      ],
+      "source": "https://platform.claude.com/docs/en/about-claude/glossary"
+    },
+    {
+      "heading": "Stop reasons",
+      "notes": [
+        "Every non-streaming response has a non-null `stop_reason` explaining why generation ended.",
+        "`end_turn`: finished naturally. `max_tokens`: hit your limit (raise it or continue). `stop_sequence`: a custom stop string matched. `tool_use`: Claude wants to call a tool (run it and return a `tool_result`). `pause_turn`: a server-tool loop paused (send the content back to continue). `refusal`: Claude declined. `model_context_window_exceeded`: response filled the window, treat as truncated.",
+        "In streaming, `stop_reason` is null in `message_start` and set in later events."
+      ],
+      "examTips": [
+        "A cut-off answer means check stop_reason first: `max_tokens` or `model_context_window_exceeded` explain truncation."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons"
+    },
+    {
+      "heading": "Hallucinations",
+      "notes": [
+        "A **hallucination** is generated text that is factually wrong or inconsistent with the provided context. Even the best models do it, and mitigation reduces but never eliminates it.",
+        "Basic strategies: explicitly **allow Claude to say 'I don't know'**; for long documents (over about 20k tokens) have it **extract word-for-word quotes first** and then reason only from those; **require citations** and have it retract any claim it cannot support with a quote.",
+        "Advanced strategies: review summarized thinking for faulty logic, **best-of-N** (run several times and compare, since inconsistency signals hallucination), iterative refinement, and **restricting external knowledge** so it uses only the provided documents.",
+        "**RAG** grounds answers by retrieving relevant documents at runtime and placing them in the context window, reducing reliance on memorization and enabling up-to-date, citable answers. Quality depends on retrieval quality."
+      ],
+      "example": {
+        "title": "Grounding prompt that permits uncertainty",
+        "language": "text",
+        "code": "Answer using ONLY the documents below. First extract the exact quotes that\nbear on the question. If the documents do not contain the answer, reply:\n\"I don't have enough information to answer.\"\n\n<documents>{{DOCS}}</documents>\nQuestion: {{QUESTION}}"
+      },
+      "examTips": [
+        "Best first fixes: permission to say 'I don't know', quote-grounding, citations. Raising temperature makes hallucination worse, not better.",
+        "Always validate high-stakes outputs; no technique makes hallucination impossible."
+      ],
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/reduce-hallucinations"
+    },
+    {
+      "heading": "Statelessness",
+      "notes": [
+        "The Messages API is **stateless**: the model remembers nothing between requests. Each request must include the full conversation history in `messages` (alternating `user` and `assistant` turns). Your application stores and resends history.",
+        "The system prompt goes in the top-level `system` parameter, not as a message.",
+        "Consecutive same-role turns are merged. A final `assistant` message acts as a prefill that continues from that text, but models without prefill support reject it with a 400.",
+        "Because history is resent, cost and context usage grow every turn. Manage it with compaction, context editing, summarization, or prompt caching for the repeated prefix.",
+        "Persistent memory across sessions must be built by you (for example the memory tool or your own store); the model itself does not keep it."
+      ],
+      "example": {
+        "title": "Resending history each turn",
+        "language": "json",
+        "code": "{\n  \"model\": \"claude-sonnet-5-5\",\n  \"max_tokens\": 1024,\n  \"system\": \"You are a concise assistant.\",\n  \"messages\": [\n    {\"role\": \"user\", \"content\": \"Hello there.\"},\n    {\"role\": \"assistant\", \"content\": \"Hi, I'm Claude. How can I help you?\"},\n    {\"role\": \"user\", \"content\": \"Can you explain LLMs in plain English?\"}\n  ]\n}"
+      },
+      "examTips": [
+        "If a chatbot 'forgets' the user's name from the previous turn, the app failed to resend the history. It is not a model bug and not fixed by a higher temperature.",
+        "Chat apps like claude.ai may manage context rolling first-in-first-out, but the raw API does not do that for you."
+      ],
+      "source": "https://platform.claude.com/docs/en/api/messages"
+    },
+    {
+      "heading": "Knowledge cutoff",
+      "notes": [
+        "A model only knows what was in its training data. The **reliable knowledge cutoff** is the date through which its knowledge is most extensive and reliable; the **training data cutoff** is the broader range of data used. The two can differ.",
+        "Current models (Fable 5.1, Opus 5.5, Sonnet 5.5, Haiku 5.5) list a reliable knowledge cutoff and training data cutoff of June 2026.",
+        "Anything after the cutoff, or private to your organization, is unknown to the model unless you supply it in the context, via retrieval, or via tools such as web search.",
+        "The cutoff is distinct from the context window: one describes what was learned in training, the other is the per-request working memory."
+      ],
+      "examTips": [
+        "Questions about recent events or live data: the fix is to provide the data (RAG, tool use, web search), not to wait for or request a retrain.",
+        "Do not confuse 'reliable knowledge cutoff' with 'training data cutoff'."
+      ],
+      "source": "https://platform.claude.com/docs/en/models/overview"
+    },
+    {
+      "heading": "Extended thinking and adaptive thinking",
+      "notes": [
+        "**Thinking** lets Claude reason before answering. Thinking tokens are **billed as output tokens** (even when the text is not returned), count toward `max_tokens`, and count toward rate limits and the context window.",
+        "**Extended thinking** (manual mode) is `thinking: {type: \"enabled\", budget_tokens: N}`. `budget_tokens` must be at least **1,024** and less than `max_tokens` (the exception is interleaved thinking). It is a target, not a strict cap. This mode is now **legacy/deprecated**: deprecated on Opus 4.6 and Sonnet 4.6, and Claude 4.7 and later models reject it with a 400.",
+        "**Adaptive thinking** (`thinking: {type: \"adaptive\"}`) lets Claude decide whether and how much to think per request, steered by the `effort` parameter (`output_config: {effort: ...}`) rather than a token budget. On Claude 5 and later models thinking is on by default.",
+        "The `display` field controls what is returned: `\"summarized\"` returns a summary of reasoning (never the raw chain of thought); `\"omitted\"` returns empty thinking text but keeps an encrypted `signature`. `omitted` is the default on the newest models; `summarized` is the default on Opus 4.6, Sonnet 4.6 and earlier.",
+        "**Interleaved thinking** lets Claude think between tool calls. It is automatic with adaptive thinking. When posting `tool_result` blocks you must return the unmodified thinking block (with its signature) that accompanied the tool request.",
+        "Whether prior turns' thinking blocks stay in context depends on the model: Opus 4.5 and later Opus, Sonnet 4.6 and later, and Haiku 5.5 keep them (billed as input afterward); earlier models strip them automatically.",
+        "Changing thinking configuration (mode or `budget_tokens`) between requests invalidates prompt cache breakpoints."
+      ],
+      "example": {
+        "title": "Legacy manual budget vs adaptive thinking",
+        "language": "json",
+        "code": "// Legacy extended thinking (Sonnet 4.6 and earlier; 400 on 4.7+)\n{\n  \"model\": \"claude-sonnet-4-6\",\n  \"max_tokens\": 16000,\n  \"thinking\": {\"type\": \"enabled\", \"budget_tokens\": 10000}\n}\n\n// Adaptive thinking with effort-based depth control\n{\n  \"model\": \"claude-sonnet-4-6\",\n  \"max_tokens\": 16000,\n  \"thinking\": {\"type\": \"adaptive\", \"display\": \"summarized\"},\n  \"output_config\": {\"effort\": \"high\"}\n}"
+      },
+      "examTips": [
+        "You pay for thinking tokens as output even if display is omitted.",
+        "budget_tokens < max_tokens, minimum 1,024. On Claude 4.7+ use adaptive thinking plus effort; `type: enabled` is a 400.",
+        "Thinking is useful for hard reasoning, math, and multi-step agentic tasks; for simple lookups or classification it adds cost and latency."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/extended-thinking"
+    },
+    {
+      "heading": "Anthropic glossary terms to know",
+      "notes": [
+        "**Context window**: working memory for a request. **Tokens**: smallest model units. **Latency**: delay between prompt submission and output. **TTFT (time to first token)**: delay until the first output token, key for interactive apps.",
+        "**LLM**, **pretraining**, **fine-tuning**, **RLHF**, **HHH**, **Constitutional AI**: see earlier sections.",
+        "**RAG**: retrieve relevant documents at runtime and pass them in the context window to ground the answer.",
+        "**MCP (Model Context Protocol)**: an open protocol standardizing how applications provide context and tools to LLMs, often compared to a USB-C port for AI. The **MCP connector** lets Messages API users connect to MCP servers directly without building an MCP client (beta).",
+        "**Temperature**: randomness control for sampling."
+      ],
+      "examTips": [
+        "TTFT measures time to the first token; latency is the overall response delay. Streaming improves perceived latency by showing tokens as they arrive.",
+        "RAG supplies knowledge at inference time; fine-tuning changes the model's weights. Pick RAG for fresh or private facts."
+      ],
+      "source": "https://platform.claude.com/docs/en/about-claude/glossary"
+    }
+  ],
+  "keyTakeaways": [
+    "Claude is a pretrained autoregressive LLM that was then fine-tuned (including RLHF) into an assistant, not a bare language model.",
+    "Tokens are the unit for billing, rate limits, max_tokens, and context; use the token counting API, and expect about 30% more tokens on Claude 4.7+ tokenizers.",
+    "The context window includes the system prompt, tools, all messages, and the generated output (including thinking); current models have 1M tokens and up to 128k output.",
+    "More context is not always better: context rot degrades recall as tokens grow, so curate context and use compaction or context editing.",
+    "RLHF uses human rankings; Constitutional AI uses written principles with AI feedback (critique and revise, then RL from AI preference).",
+    "Temperature 0 is not fully deterministic; on Opus 4.7 and newer and Sonnet 5 and newer, non-default temperature, top_p, or top_k returns a 400.",
+    "Reduce hallucinations by allowing 'I don't know', quoting sources first, citations, best-of-N, and restricting to provided documents; they cannot be fully eliminated.",
+    "The Messages API is stateless: your app must resend the full history on every request.",
+    "Knowledge stops at the training cutoff (June 2026 for current models); supply newer or private data via RAG, tools, or web search.",
+    "Thinking tokens are billed as output tokens and count toward max_tokens; manual budget_tokens (min 1,024, less than max_tokens) is legacy, and adaptive thinking with effort is the current approach.",
+    "Check stop_reason to diagnose truncation or next steps: max_tokens, tool_use, pause_turn, refusal, model_context_window_exceeded."
+  ],
+  "glossary": [
+    {"term": "LLM", "definition": "Large language model: a model with many parameters trained on vast text data to generate and understand language."},
+    {"term": "Token", "definition": "Smallest unit a model processes (word, subword, character, or byte). Used for billing, limits, and context size."},
+    {"term": "Context window", "definition": "All the text the model can reference when generating, including its own output; the model's working memory per request."},
+    {"term": "Context rot", "definition": "Degradation of accuracy and recall as the number of tokens in context grows."},
+    {"term": "Pretraining", "definition": "Initial training on a large unlabeled corpus to predict the next token."},
+    {"term": "Fine-tuning", "definition": "Further training of a pretrained model on additional data to adapt behavior, domain, or style."},
+    {"term": "RLHF", "definition": "Reinforcement learning from human feedback: humans rank outputs and the model is trained toward preferred ones."},
+    {"term": "Constitutional AI", "definition": "Training a model to follow written principles using AI-generated critiques and preference feedback instead of mostly human labels."},
+    {"term": "HHH", "definition": "Helpful, honest, harmless: the research framework guiding how Claude is trained."},
+    {"term": "Temperature", "definition": "Parameter controlling randomness of sampling; low is conservative, high is varied. Not fully deterministic even at 0."},
+    {"term": "top_p / top_k", "definition": "Sampling controls that limit which candidate tokens may be chosen (nucleus and top-k sampling); rejected on newer models when non-default."},
+    {"term": "max_tokens", "definition": "Required cap on tokens generated in a response; thinking tokens count toward it."},
+    {"term": "stop_sequence", "definition": "Custom string that ends generation when produced; reported via stop_reason stop_sequence."},
+    {"term": "Hallucination", "definition": "Generated content that is factually incorrect or inconsistent with the provided context."},
+    {"term": "RAG", "definition": "Retrieval augmented generation: retrieve relevant documents at runtime and supply them in context to ground the answer."},
+    {"term": "Stateless", "definition": "The API keeps no conversation memory between requests; the client resends full history each time."},
+    {"term": "Knowledge cutoff", "definition": "Date through which a model's knowledge is most extensive and reliable (reliable cutoff) versus the broader training data cutoff."},
+    {"term": "Extended thinking", "definition": "Legacy manual thinking mode using thinking.type enabled with budget_tokens; deprecated and rejected on Claude 4.7+."},
+    {"term": "Adaptive thinking", "definition": "Mode where Claude decides when and how much to think, steered by the effort parameter."},
+    {"term": "Effort", "definition": "output_config parameter that steers how much Claude thinks and how thorough the response is in adaptive mode."},
+    {"term": "Latency", "definition": "Time between submitting a prompt and receiving the generated output."},
+    {"term": "TTFT", "definition": "Time to first token: how long until the model emits its first output token."},
+    {"term": "MCP", "definition": "Model Context Protocol: open standard for connecting LLM applications to data sources and tools."},
+    {"term": "MCP connector", "definition": "Beta Messages API feature that connects to MCP servers directly without a custom MCP client."},
+    {"term": "Compaction", "definition": "Server-side summarization of earlier conversation turns so a conversation can continue past the context window limit (beta)."}
+  ],
+  "quiz": [
+    {
+      "q": "A support chatbot built on the Messages API greets returning users correctly in turn 1 but, in turn 2, asks for their name again. The developer sends only the newest user message on each request. What is the root cause and fix?",
+      "options": [
+        "The model's temperature is too low; raise it so it recalls prior turns",
+        "The API is stateless; resend the full conversation history in `messages` on every request",
+        "The knowledge cutoff has passed; switch to a newer model",
+        "The context window is too small; enable extended thinking"
+      ],
+      "answer": 1,
+      "explanation": "The Messages API keeps no state between calls, so the application must include prior user and assistant turns. Temperature affects randomness, not memory. The knowledge cutoff concerns training data, and extended thinking does not create memory.",
+      "source": "https://platform.claude.com/docs/en/api/messages"
+    },
+    {
+      "q": "Your company wants Claude to answer questions about an internal policy handbook that changes weekly. Which approach best fits?",
+      "options": [
+        "Fine-tune Claude through the self-serve API each week",
+        "Rely on the model's pretraining since it is a large model",
+        "Retrieve relevant handbook passages at request time and place them in the context window (RAG)",
+        "Increase top_k so the model explores more knowledge"
+      ],
+      "answer": 2,
+      "explanation": "RAG supplies fresh, private facts at inference time and enables citations. The Claude API does not offer self-serve fine-tuning, pretraining data cannot include your private weekly updates, and top_k only affects sampling, not knowledge.",
+      "source": "https://platform.claude.com/docs/en/about-claude/glossary"
+    },
+    {
+      "q": "A developer migrating to Claude Sonnet 5.5 adds `temperature: 0.2` and `top_k: 40` to get consistent classification output, and every request now fails with a 400. What should they do?",
+      "options": [
+        "Retry with exponential backoff",
+        "Remove the sampling parameters and constrain output through the prompt (for example, answer in one word from a fixed list)",
+        "Set temperature to 1.0 and keep top_k",
+        "Switch the anthropic-version header to an older date and keep both values forever"
+      ],
+      "answer": 1,
+      "explanation": "Newer models reject non-default temperature, top_p, and top_k with a 400, which is a validation error and not transient. The recommended migration is to omit them and steer behavior with the prompt. Keeping top_k still errors, and pinning an old API version is a workaround, not the recommended fix.",
+      "source": "https://platform.claude.com/docs/en/api/messages"
+    },
+    {
+      "q": "A team sets temperature to 0 on an older Claude model and assumes identical inputs will always return byte-identical outputs, then builds exact-match tests on that assumption. What is wrong?",
+      "options": [
+        "Temperature 0 is invalid and defaults to 1",
+        "Nothing; temperature 0 guarantees determinism",
+        "Even at temperature 0, outputs are not fully deterministic, so tests should tolerate variation",
+        "Determinism only fails on third-party clouds, never on Anthropic's own API"
+      ],
+      "answer": 2,
+      "explanation": "Anthropic states that even at temperature 0 results are not fully deterministic, on both first-party inference and third-party cloud providers. Exact-match tests are therefore brittle.",
+      "source": "https://platform.claude.com/docs/en/about-claude/glossary"
+    },
+    {
+      "q": "An analyst asks Claude to summarize a 60-page contract, and the answer includes a clause that is not in the document. Which mitigation is most aligned with Anthropic's guidance?",
+      "options": [
+        "Raise temperature so the model considers more options",
+        "Ask Claude to first extract word-for-word quotes, then answer using only those quotes, and permit it to say it does not know",
+        "Shorten max_tokens so there is less room to invent text",
+        "Switch off the system prompt"
+      ],
+      "answer": 1,
+      "explanation": "For long documents, extracting direct quotes first grounds the response, and allowing 'I don't know' reduces fabrication. Higher temperature increases variance, lowering max_tokens just truncates, and removing the system prompt does not address grounding.",
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/reduce-hallucinations"
+    },
+    {
+      "q": "Which statement about RLHF and Constitutional AI is correct?",
+      "options": [
+        "Both rely exclusively on humans ranking outputs",
+        "RLHF uses human rankings of outputs; Constitutional AI uses a written set of principles with AI-generated feedback replacing much of the human feedback",
+        "Constitutional AI is the pretraining step that predicts the next token",
+        "RLHF is applied at inference time to filter outputs"
+      ],
+      "answer": 1,
+      "explanation": "RLHF trains toward human preferences from rankings. Constitutional AI has the model critique and revise against principles and uses AI preference judgments as the reward. Pretraining is a separate next-token step, and neither is an inference-time filter.",
+      "source": "https://www.anthropic.com/news/claudes-constitution"
+    },
+    {
+      "q": "A raw pretrained language model (no fine-tuning, no RLHF) is given 'What is the capital of France?'. What is the most likely behavior?",
+      "options": [
+        "It reliably answers like an assistant",
+        "It may just continue the text in a document-like way, because pretraining only teaches next-token prediction",
+        "It refuses because it lacks HHH training",
+        "It queries the internet for the answer"
+      ],
+      "answer": 1,
+      "explanation": "Pretrained models predict the next token and are not inherently good at following instructions; fine-tuning and RLHF make them behave like assistants. Models do not browse by themselves.",
+      "source": "https://platform.claude.com/docs/en/about-claude/glossary"
+    },
+    {
+      "q": "A request to a 1M-context Claude model contains a 900k-token prompt and sets max_tokens to 200,000 (a model that supports it). Generation reaches the end of the window mid-answer. What do you observe?",
+      "options": [
+        "A 400 error before any generation begins, on all models",
+        "The request is accepted and stops with stop_reason `model_context_window_exceeded`, so the output is truncated",
+        "The model silently drops the oldest messages and continues",
+        "stop_reason is `end_turn` with a complete answer"
+      ],
+      "answer": 1,
+      "explanation": "On Claude 4.5 and newer, input plus max_tokens exceeding the window is accepted, and hitting the limit yields `model_context_window_exceeded`. A 400 is returned only when the input alone exceeds the window. The API does not drop messages for you.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/context-windows"
+    },
+    {
+      "q": "A developer adds prompt caching to a long conversation and expects it to free up room in the context window. What actually happens?",
+      "options": [
+        "Cached tokens are removed from the window",
+        "Cached tokens still count toward the window; caching only changes what you pay and latency",
+        "Cached tokens count double",
+        "Caching raises the window limit to 2M"
+      ],
+      "answer": 1,
+      "explanation": "Cached prompt prefixes still occupy the context window. Caching changes cost and speed, not window consumption. Use compaction or context editing to actually reduce usage.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/context-windows"
+    },
+    {
+      "q": "A developer on Claude Sonnet 4.6 enables manual extended thinking with `max_tokens: 2000` and `budget_tokens: 4000`. What happens, and what is the general rule?",
+      "options": [
+        "It works; budget_tokens can be any size",
+        "It is rejected: budget_tokens must be at least 1,024 and less than max_tokens (outside the interleaved-thinking exception)",
+        "It works but thinking is not billed",
+        "It is rejected only because the minimum is 10,000"
+      ],
+      "answer": 1,
+      "explanation": "Thinking tokens count toward max_tokens, so the budget must leave room for the final answer; the minimum budget is 1,024. Thinking tokens are billed as output tokens. The 10,000 figure is just an example value in the docs.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/extended-thinking"
+    },
+    {
+      "q": "A team calls Claude Opus 5.5 with `thinking: {type: \"enabled\", budget_tokens: 8000}` copied from an older codebase and gets a 400. What is the recommended change?",
+      "options": [
+        "Increase budget_tokens to 16000",
+        "Use `thinking: {type: \"adaptive\"}` and control depth with `output_config.effort`",
+        "Add the interleaved-thinking beta header",
+        "Downgrade the SDK"
+      ],
+      "answer": 1,
+      "explanation": "Claude 4.7 and later models reject manual extended thinking. Adaptive thinking with the effort parameter replaces budget_tokens. Changing the budget size or adding a beta header does not make the request valid.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/extended-thinking"
+    },
+    {
+      "q": "A finance team is surprised that their monthly bill includes charges for reasoning even though they set thinking display to `omitted` and never see any thinking text. Why?",
+      "options": [
+        "Omitted display is a billing bug",
+        "Thinking tokens are billed as output tokens whether or not the text is returned",
+        "Omitted display switches the model to a pricier tier",
+        "Thinking is billed only as input tokens"
+      ],
+      "answer": 1,
+      "explanation": "The model still generates the thinking tokens, which are billed as output and count toward max_tokens and rate limits. `display` only controls whether a summary is returned.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/thinking"
+    },
+    {
+      "q": "A user asks an assistant built on Claude about a news event from last week, and the answer is vague or wrong. Which is the best fix?",
+      "options": [
+        "Raise max_tokens",
+        "Provide current information via web search or retrieval so it is in the context",
+        "Lower temperature to 0",
+        "Ask the model to think harder with a larger budget"
+      ],
+      "answer": 1,
+      "explanation": "Events after the knowledge cutoff are not in the model's training data. Supplying current data through tools or RAG is the remedy; sampling or thinking settings cannot create knowledge the model lacks.",
+      "source": "https://platform.claude.com/docs/en/models/overview"
+    },
+    {
+      "q": "Your app sometimes shows half-finished answers. The response object has `stop_reason: \"max_tokens\"`. What does this indicate and what should you do?",
+      "options": [
+        "Claude finished naturally; nothing to do",
+        "The response hit your max_tokens limit; raise max_tokens or continue the response",
+        "A tool call is pending; return a tool_result",
+        "Claude refused the request"
+      ],
+      "answer": 1,
+      "explanation": "`max_tokens` means generation was cut at your limit. `end_turn` is natural completion, `tool_use` signals a pending tool call, and `refusal` means Claude declined.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons"
+    },
+    {
+      "q": "A developer migrates a workload from an older Claude model to Claude Opus 4.7 or later and notices the same prompts consume noticeably more tokens, hitting limits sooner. What is the most likely explanation?",
+      "options": [
+        "Prompt caching was disabled automatically",
+        "Claude 4.7 and later use a newer tokenizer that produces about 30 percent more tokens for the same text",
+        "The context window shrank to 200k",
+        "Thinking is always on and billed as input"
+      ],
+      "answer": 1,
+      "explanation": "The glossary notes that Claude 4.7 and later models use a tokenizer that yields roughly 30 percent more tokens for the same text. Re-measure with the token counting API for the target model. The other options do not match the documented behavior.",
+      "source": "https://platform.claude.com/docs/en/about-claude/glossary"
+    }
+  ]
+}

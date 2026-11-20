@@ -1,0 +1,667 @@
+{
+  "slug": "cost-token-management",
+  "title": "Cost/Token Management",
+  "overview": "This objective covers how Claude API usage is priced and how to control it: per-token rates and multipliers, prompt caching (breakpoints, TTLs, minimums, invalidation), the 50% Batch discount, token counting, max_tokens, context editing and compaction, thinking token billing, rate and spend limits, usage and cost reporting, and Claude Code cost tracking. The exam tests whether you can calculate real costs and pick the right lever for a scenario. Expect numbers (multipliers, minimums, limits) and gotchas such as cache invalidation and billing from usage.iterations.",
+  "sources": [
+    {
+      "title": "Pricing",
+      "url": "https://platform.claude.com/docs/en/about-claude/pricing"
+    },
+    {
+      "title": "Prompt caching",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/prompt-caching"
+    },
+    {
+      "title": "Batch processing",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/batch-processing"
+    },
+    {
+      "title": "Token counting",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/token-counting"
+    },
+    {
+      "title": "Handling stop reasons (max_tokens)",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons"
+    },
+    {
+      "title": "Steering thinking (cost and pricing)",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/thinking-steering-and-cost"
+    },
+    {
+      "title": "Extended thinking (legacy budget_tokens)",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/extended-thinking"
+    },
+    {
+      "title": "Context editing",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/context-editing"
+    },
+    {
+      "title": "Compaction overview",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/compaction"
+    },
+    {
+      "title": "Compaction at a token threshold",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/compaction-threshold"
+    },
+    {
+      "title": "Rate limits",
+      "url": "https://platform.claude.com/docs/en/api/rate-limits"
+    },
+    {
+      "title": "Usage and Cost API",
+      "url": "https://platform.claude.com/docs/en/manage-claude/usage-cost-api"
+    },
+    {
+      "title": "Usage and Cost Analytics API",
+      "url": "https://platform.claude.com/docs/en/manage-claude/usage-cost-analytics-api"
+    },
+    {
+      "title": "Manage costs effectively (Claude Code)",
+      "url": "https://code.claude.com/docs/en/costs"
+    }
+  ],
+  "sections": [
+    {
+      "heading": "Pricing structure: what you are billed for",
+      "notes": [
+        "Billing is per million tokens (MTok), with **separate rates for base input, 5-minute cache writes, 1-hour cache writes, cache reads (hits/refreshes), and output**. Output costs several times more than input (for example Sonnet 5.5 is $2 in / $10 out, Opus 5.5 is $4 / $20, Haiku 4.5 is $1 / $5, Fable 5.1 is $10 / $50).",
+        "Cache multipliers are relative to base input: **5m write = 1.25x, 1h write = 2x, read = 0.1x**. Exceptions for reads: **0.05x on Opus 5.5 and Sonnet 5.5**, and **0.025x on Fable 5.1 and Mythos 5.1**.",
+        "Claude 4.6 and later models (except Haiku 5.5) include the **full 1M context window at standard per-token rates**: a 900k-token request costs the same per token as a 9k one. **Haiku 5.5 is the exception**: prompts over 100,000 tokens (counting cache reads and writes) are billed at higher rates ($0.50 in / $2.50 out vs $0.10 / $0.50).",
+        "Modifiers **stack multiplicatively**: Batch (0.5x), cache multipliers, data residency (`inference_geo: \"us\"` = **1.1x** on all token categories for Claude 4.6+), and fast mode (Opus 5.5: $8 / $40; Opus 5 and 4.8: $10 / $50). Fast mode is **not available with Batch**.",
+        "Claude 4.7 and later models (and the Fable/Mythos families) use a **newer tokenizer that yields roughly 30% more tokens for the same text**, so re-count prompts per model before estimating cost; do not reuse counts from older models.",
+        "Tool use adds cost: tool definitions, `tool_use` and `tool_result` blocks are all input/output tokens, plus a per-model tool-use system prompt. Server tools may add usage fees: **web search $10 per 1,000 searches**, web fetch no extra charge beyond tokens, code execution billed by container time (free when used with web search/fetch of the 20260209+ versions; otherwise 1,550 free hours per month then $0.05/hour).",
+        "Failed web searches are not billed; canceled or expired batch requests are not billed."
+      ],
+      "examTips": [
+        "Know the ordering of rates: cache read << base input < 5m write < 1h write < output.",
+        "'Which model has the cheapest cache hit?' is a trap: use the per-model multiplier (0.1 default, 0.05 Opus/Sonnet 5.5, 0.025 Fable/Mythos 5.1), not a flat 10%.",
+        "Haiku 5.5 is the only current model with a long-prompt price step at 100k tokens; other 4.6+ models have flat pricing over 1M."
+      ],
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "example": {
+        "title": "Per-request cost formula",
+        "language": "text",
+        "code": "cost = ( input_tokens            * base_in\n        + cache_creation_5m       * base_in * 1.25\n        + cache_creation_1h       * base_in * 2.0\n        + cache_read_input_tokens * base_in * read_mult   # 0.1 (0.05 Opus/Sonnet 5.5, 0.025 Fable 5.1)\n        + output_tokens           * base_out ) / 1_000_000\n# output_tokens already INCLUDES thinking tokens\n# then x 0.5 if Batch, x 1.1 if inference_geo='us'"
+      }
+    },
+    {
+      "heading": "Prompt caching: breakpoints and how reads match",
+      "notes": [
+        "Caching stores a **prefix** of the prompt so later requests that begin with an identical prefix read it at a fraction of base price. Cache order is **tools -> system -> messages**.",
+        "Two ways to enable: **automatic caching** (one top-level `cache_control: {\"type\": \"ephemeral\"}`; the system puts the breakpoint on the last cacheable block and moves it forward as the conversation grows) or **explicit breakpoints** on individual content blocks.",
+        "**Up to 4 breakpoints per request**; automatic caching uses one of those slots. If all 4 explicit slots are used the automatic field returns 400; if the last block already has explicit `cache_control` with a different TTL, also 400; with the same TTL it is a no-op.",
+        "Writes happen **only at breakpoints**. On reads the system looks backward from the breakpoint across **at most 20 positions** for an entry an earlier request wrote (consecutive `tool_use` blocks or consecutive `tool_result` blocks each count as one). In long agent loops add a second breakpoint closer to the earlier write.",
+        "Hits need a **100% identical prefix** (all text and images up to the breakpoint). Put the breakpoint on the **last block identical across requests**, never on something that varies per request like a timestamp.",
+        "Breakpoints themselves are free; you pay for cache writes, cache reads and uncached input only. Caches are isolated per **organization**, and per **workspace** on the Claude API, Claude Platform on AWS and Foundry (Bedrock and Google-managed Vertex isolate by organization only).",
+        "A cache entry only becomes available **after the first response starts**, so for parallel requests send one first and wait for it to begin responding before fanning out.",
+        "Thinking blocks cannot carry `cache_control` directly but are cached as part of the prefix when passed back in earlier assistant turns; when read from cache they count as input tokens."
+      ],
+      "examTips": [
+        "Max breakpoints = 4. Lookback = 20 blocks. Memorize both.",
+        "Parallel cold-start requests all pay the write: the cache is not usable until the first response begins.",
+        "If hits stop in a long conversation, the usual cause is the breakpoint moving more than 20 blocks past the last write: add an intermediate breakpoint."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-caching",
+      "example": {
+        "title": "Automatic caching plus explicit system breakpoint",
+        "language": "json",
+        "code": "{\n  \"model\": \"claude-opus-5-5\",\n  \"max_tokens\": 1024,\n  \"cache_control\": { \"type\": \"ephemeral\" },\n  \"system\": [\n    { \"type\": \"text\",\n      \"text\": \"You are a helpful assistant.\",\n      \"cache_control\": { \"type\": \"ephemeral\" } }\n  ],\n  \"messages\": [{ \"role\": \"user\", \"content\": \"What are the key terms?\" }]\n}"
+      }
+    },
+    {
+      "heading": "Prompt caching: TTLs, minimums, multipliers and break-even",
+      "notes": [
+        "**Two TTLs**: 5 minutes (default, write = 1.25x) and 1 hour (`\"ttl\": \"1h\"`, write = 2x). Cache hits **refresh the lifetime at no cost**. The lifetime is measured from the **start** of the request that wrote or read the entry, so generation time counts against it.",
+        "**Mixed TTLs**: 1-hour entries must appear **before** 5-minute entries in the prompt.",
+        "**Minimum cacheable prompt length** varies by model; shorter prompts are processed uncached **with no error** (you just see 0 creation and 0 read tokens): **512** tokens (Fable 5.1, Mythos 5.1, Opus 5.5, Opus 5, Sonnet 5.5, Fable 5, Mythos 5, Haiku 5.5); **1,024** (Opus 4.8, Sonnet 5, Sonnet 4.6, Sonnet 4.5, Opus 4.1, Opus 4, Sonnet 4); **2,048** (Mythos Preview, Opus 4.7); **4,096** (Opus 4.6, Opus 4.5, Haiku 4.5).",
+        "**Break-even**: with the standard 0.1x read, a 5m write pays off after **one** read (1.25 + 0.1 = 1.35 vs 2.0 for two uncached requests). A 1h write pays off after **two** reads. Cheaper reads (0.05x, 0.025x) improve this further.",
+        "Choose 1h when requests arrive less often than every 5 minutes, when many requests share a prefix over a long window (also batches), or when idle gaps would otherwise let the 5m entry expire.",
+        "**Pre-warming**: send `max_tokens: 0` with a `cache_control` breakpoint on the shared content; the response has empty content, `stop_reason: \"max_tokens\"`, and **output tokens are not billed**. It is rejected with `stream: true`, extended thinking, structured outputs, `tool_choice` of `tool`/`any`, and inside Message Batches.",
+        "Usage fields: `input_tokens` = tokens **after the last breakpoint** (uncached), `cache_creation_input_tokens` = written this request, `cache_read_input_tokens` = read. **Total input = read + creation + input_tokens.** The `cache_creation` object splits `ephemeral_5m_input_tokens` and `ephemeral_1h_input_tokens`; they sum to `cache_creation_input_tokens`."
+      ],
+      "examTips": [
+        "A low `input_tokens` with caching on does NOT mean a short prompt: it only counts tokens after the last breakpoint.",
+        "Both creation and read equal 0 and no error: prompt is under the model's minimum (check Haiku 4.5 / Opus 4.5-4.6 = 4,096).",
+        "1h entries before 5m entries; reversing the order is invalid."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-caching",
+      "example": {
+        "title": "Reading cache usage (1h TTL mix)",
+        "language": "json",
+        "code": "{\n  \"usage\": {\n    \"input_tokens\": 2048,\n    \"cache_read_input_tokens\": 1800,\n    \"cache_creation_input_tokens\": 248,\n    \"output_tokens\": 503,\n    \"cache_creation\": {\n      \"ephemeral_5m_input_tokens\": 148,\n      \"ephemeral_1h_input_tokens\": 100\n    }\n  }\n}\n# total input tokens = 1800 + 248 + 2048 = 4096"
+      }
+    },
+    {
+      "heading": "Prompt caching: what invalidates the cache",
+      "notes": [
+        "A change at one level invalidates **that level and all later levels** (tools -> system -> messages).",
+        "Changes to **tool definitions** (names, descriptions, parameters) invalidate **everything** (tools, system and messages).",
+        "Toggling **web search**, **citations**, or the **speed setting** (`fast` vs standard) invalidates tools and everything after (the table marks tools; the system and messages levels follow from the hierarchy). **`tool_choice`** changes and **adding/removing images** invalidate the system and messages levels onward.",
+        "**Thinking parameters** and **`output_config.effort`** are model-specific: the resolved effort or `budget_tokens` value is rendered into the prompt, so changing it between requests invalidates message-level breakpoints. Setting effort **explicitly to the model default is equivalent to omitting it** and does not break the cache.",
+        "Adding **non-tool-result user content** in a thinking conversation invalidates tools and system everywhere; on Opus 4.5+, Sonnet 4.6+ and Haiku 5.5 message-level thinking blocks are preserved, on earlier models through Haiku 4.5 they are stripped (messages cache invalidated).",
+        "A `role: \"system\"` message inside `messages` (on supported models) can add instructions without invalidating system or message caches; the `inline-tools-2026-09-15` beta lets you add tools mid-conversation without changing `tools`. Per-message effort changes (beta) also keep earlier breakpoints.",
+        "Context editing and compaction also invalidate the cached prefix at the point of clearing or summarizing (see later section)."
+      ],
+      "examTips": [
+        "Scenario trap: 'We changed one tool description and costs spiked': tool changes invalidate the whole cache, so every request re-pays the 1.25x/2x write.",
+        "Pick one thinking config and one top-level effort for a conversation's lifetime; use per-message steering instead of changing them.",
+        "Keep tool definitions stable and ordered identically; put volatile content last."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-caching",
+      "example": {
+        "title": "Effort change breaks the cache (from the docs experiment)",
+        "language": "text",
+        "code": "Request 1 (effort default):  cache_creation_input_tokens: 3546, cache_read_input_tokens: 0\nRequest 2 (same config):     cache_creation_input_tokens: 0,    cache_read_input_tokens: 3546\nRequest 3 (effort: \"low\"):   cache_creation_input_tokens: 3546, cache_read_input_tokens: 0   <- MISS, re-written"
+      }
+    },
+    {
+      "heading": "Message Batches API: 50% discount",
+      "notes": [
+        "The Batch API processes Messages requests asynchronously at **50% off both input and output tokens** (e.g. Sonnet 5.5 batch is $1 in / $5 out, Opus 5.5 is $2 / $10, Haiku 5.5 up to 100k is $0.05 / $0.25).",
+        "Limits: a batch holds **up to 100,000 requests or 256 MB**, whichever comes first. Most batches finish in under an hour; results are available when all requests finish or after **24 hours**, and batches **expire if not done within 24 hours** (expired and canceled requests are **not billed**).",
+        "Results are downloadable for **29 days** after creation (via `results_url`; stream them). Each request needs a unique `custom_id` (`^[a-zA-Z0-9_-]{1,64}$`), and **results are not guaranteed to return in input order**, so match by `custom_id`.",
+        "`processing_status` goes `in_progress` -> `ended`. Per-request result types: `succeeded`, `errored`, `canceled`, `expired`.",
+        "Batches are scoped to a workspace. Each batched request needs `max_tokens >= 1` (`max_tokens: 0` pre-warming is not allowed). Batches may slightly exceed a configured spend limit because of concurrent processing.",
+        "**Stacking**: batch discount stacks with caching multipliers and long-context rules. Because batches can take longer than 5 minutes, use the **1-hour cache TTL** for shared context. Cache hits inside a batch are best-effort, not guaranteed.",
+        "Not eligible for zero data retention (29-day retention). Fast mode is unavailable with Batch. Batch has its own rate limits (RPM and a queue cap, e.g. Start tier 200,000 queued requests; 100,000 per batch)."
+      ],
+      "examTips": [
+        "Use Batch for offline evals, bulk classification, nightly summarization: anything not latency sensitive.",
+        "Batch is NOT right when a user is waiting, and it cannot be combined with fast mode.",
+        "Discount is 50% (not 90%): the 90% figure belongs to cache reads."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/batch-processing",
+      "example": {
+        "title": "Create a batch and read results",
+        "language": "python",
+        "code": "import anthropic\nclient = anthropic.Anthropic()\n\nbatch = client.messages.batches.create(requests=[\n    {\"custom_id\": \"doc-1\",\n     \"params\": {\"model\": \"claude-sonnet-5-5\", \"max_tokens\": 1024,\n                \"system\": [{\"type\": \"text\", \"text\": LONG_SHARED_CONTEXT,\n                            \"cache_control\": {\"type\": \"ephemeral\", \"ttl\": \"1h\"}}],\n                \"messages\": [{\"role\": \"user\", \"content\": \"Summarize doc 1\"}]}},\n    # ... up to 100,000 requests / 256 MB\n])\n# poll until batch.processing_status == \"ended\", then:\nfor r in client.messages.batches.results(batch.id):\n    if r.result.type == \"succeeded\":\n        print(r.custom_id, r.result.message.content[0].text)"
+      }
+    },
+    {
+      "heading": "Token counting and estimating cost up front",
+      "notes": [
+        "`POST /v1/messages/count_tokens` accepts the same structure as Messages (system, tools, images, PDFs, thinking blocks) and returns `input_tokens`. It is **free**, but has its own RPM limits by tier (**Start 5,000, Build 10,000, Scale 20,000**) that are **independent** of message-creation limits.",
+        "The count is an **estimate**; it may include system-added tokens that you are **not billed for**.",
+        "It does **not use caching logic**: `cache_control` blocks may be sent, but caching happens only on real message creation. It also does not trigger compaction (it applies existing compaction blocks and reports `context_management.original_input_tokens`).",
+        "Unsupported inputs (return `invalid_request_error`): server tools such as web search, web fetch, code execution, tool search (the advisor tool is an exception), the MCP connector, and `image`/`document` blocks with `url` or `file` sources (send base64 instead). Client tools are fine.",
+        "Claude 4.7+ (and Fable/Mythos) tokenizers produce about **30% more tokens** for the same text, so **count with the model you will run**; usage and billing reflect that tokenizer.",
+        "Thinking: thinking blocks from earlier turns count as input only on models that keep all prior turns; the current turn's thinking counts toward input."
+      ],
+      "examTips": [
+        "Token counting is free and separately rate limited: it does not eat your Messages RPM/ITPM.",
+        "Migrating models (e.g. 4.6 to 4.7+): recount; do not scale estimates by old token counts.",
+        "Counting does not warm or test the cache."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/token-counting",
+      "example": {
+        "title": "Count tokens before sending",
+        "language": "python",
+        "code": "resp = client.messages.count_tokens(\n    model=\"claude-opus-5-5\",\n    system=\"You are a scientist\",\n    messages=[{\"role\": \"user\", \"content\": \"Hello, Claude\"}],\n)\nprint(resp.input_tokens)   # e.g. 14   (free; separate RPM limit)\nest_cost = resp.input_tokens * 4 / 1_000_000   # Opus 5.5 base input $4/MTok"
+      }
+    },
+    {
+      "heading": "max_tokens: the output cap and cost control",
+      "notes": [
+        "`max_tokens` is a **hard cap on output tokens for that request**, and **thinking tokens count toward it**. Claude never generates past it. In a tool-use loop, each request has its own `max_tokens`, so it does not bound the spend of the whole turn.",
+        "If the cap is hit, `stop_reason` is `\"max_tokens\"`. Responses are valid but truncated: raise the cap, or continue the response. A truncated final `tool_use` block is **unusable**: retry with a higher limit.",
+        "`stop_reason: \"model_context_window_exceeded\"` means the response filled the context window before `max_tokens`; treat it as truncated.",
+        "Setting `max_tokens` high does **not** hurt rate limits: **OTPM is measured on actual generated tokens, not on `max_tokens`**. It only matters as a cost ceiling and, for the Python SDK, large values (roughly above 21k) require streaming.",
+        "With thinking, size `max_tokens` for reasoning **plus** answer. If you see `max_tokens` stops at high effort, either raise the cap (if the reasoning mattered) or lower effort (if it over-thought). In legacy manual mode, `budget_tokens` must be at least 1,024 and less than `max_tokens` (except interleaved thinking).",
+        "Batch requires `max_tokens >= 1`; `max_tokens: 0` is only for cache pre-warming outside batches, and is billed as zero output."
+      ],
+      "examTips": [
+        "max_tokens is a ceiling, not a target; you are billed only for tokens actually generated.",
+        "A high max_tokens does not reduce your OTPM headroom.",
+        "Thinking + answer share one cap: the classic bug is a small max_tokens that leaves nothing for the visible answer."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons",
+      "example": {
+        "title": "Handling truncation",
+        "language": "python",
+        "code": "resp = client.messages.create(model=\"claude-sonnet-5-5\", max_tokens=1024,\n                               tools=tools, messages=messages)\nif resp.stop_reason == \"max_tokens\":\n    last = resp.content[-1]\n    if last.type == \"tool_use\":\n        # incomplete tool call: unusable, retry with more room\n        resp = client.messages.create(model=\"claude-sonnet-5-5\", max_tokens=4096,\n                                      tools=tools, messages=messages)"
+      }
+    },
+    {
+      "heading": "Thinking token costs",
+      "notes": [
+        "**Thinking tokens are billed as output tokens** at the model's output rate. With `display: \"summarized\"` or `\"omitted\"` you are billed for the **full internal thinking**, not the shorter visible summary (no charge for summary generation). The billed `output_tokens` therefore exceeds the visible text.",
+        "Read `usage.output_tokens_details.thinking_tokens` to see how many billed output tokens were reasoning (always <= `output_tokens`; when streaming it appears on the final `message_delta`). `output_tokens` stays the authoritative billing total.",
+        "**Prior-turn thinking blocks** that stay in context are billed as **input**: all earlier turns on keep-all models (Opus 4.5 and models 4.6+), only the last turn on older models (Sonnet 4.5, Haiku 4.5 and earlier strip them).",
+        "Cost control on current models: **adaptive thinking** (`thinking: {type: \"adaptive\"}`) plus `output_config.effort` (`low`, `medium`, `high`, `xhigh`, `max`). Defaults: **`medium` on Opus 5.5 and Haiku 5.5**, `high` on most others. Effort is soft guidance; `max_tokens` is the hard cap.",
+        "**Legacy extended thinking** (`type: \"enabled\"` + `budget_tokens`) is deprecated; Claude 4.7+ models reject it with 400. The budget is a target, not a strict cap, minimum 1,024; above 32k use batch to avoid timeouts.",
+        "Caching interaction: changing effort or `budget_tokens` mid-conversation invalidates message-level cache entries. Use per-message prompting or per-message effort (beta) to vary thinking without breaking the cache. Asking Sonnet 5.5 or Haiku 5.5 in the prompt to think less is unreliable; lower effort instead.",
+        "In Claude Code, thinking is on by default and billed as output; you cannot turn it off on Opus 5.5, Sonnet 5.5, Haiku 5.5 or Fable models; lower `/effort` instead. `MAX_THINKING_TOKENS` applies only to fixed-budget models."
+      ],
+      "examTips": [
+        "You pay for the full thinking even though you only see a summary (or nothing with display: omitted).",
+        "To cut thinking cost: lower effort first; cap with max_tokens; do not rely on 'think less' prompts for Sonnet/Haiku 5.5.",
+        "Thinking in earlier turns costs again as input on later turns (keep-all models); cache reads make this cheap."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/thinking-steering-and-cost",
+      "example": {
+        "title": "Thinking usage and cost",
+        "language": "python",
+        "code": "resp = client.messages.create(\n    model=\"claude-opus-5-5\", max_tokens=16000,\n    thinking={\"type\": \"adaptive\"},\n    output_config={\"effort\": \"medium\"},\n    messages=[{\"role\": \"user\", \"content\": \"Prove sqrt(2) is irrational.\"}],\n)\nu = resp.usage   # e.g. input_tokens=25, output_tokens=8000\nreasoning = u.output_tokens_details.thinking_tokens   # e.g. 6500\ncost = (u.input_tokens*4 + u.output_tokens*20) / 1e6   # Opus 5.5: $4 in / $20 out\n# 8000 output tokens (6500 of them thinking) -> $0.16 + tiny input"
+      }
+    },
+    {
+      "heading": "Managing long context: context editing and compaction",
+      "notes": [
+        "**Context editing** (beta header `context-management-2025-06-27`) clears content server-side by rule; the client keeps full history. Strategies: `clear_tool_uses_20250919` (clears oldest tool results, replaced with placeholder text) and `clear_thinking_20251015` (clears older thinking blocks). When combining, list `clear_thinking` **first**.",
+        "`clear_tool_uses` options: `trigger` (default **100,000 input tokens**, or `tool_uses`), `keep` (default **3** recent tool use/result pairs), `clear_at_least` (minimum tokens to clear, else not applied), `exclude_tools`, `clear_tool_inputs` (default false). `clear_thinking` `keep` defaults to the last 1 thinking turn (`\"all\"` keeps everything).",
+        "**Cache impact**: clearing tool results **invalidates the cached prefix**, so set `clear_at_least` so each clear saves enough to justify the re-write. Keeping thinking blocks preserves the cache; clearing them invalidates at the clearing point. Applied edits are reported in `context_management.applied_edits`.",
+        "**Compaction** replaces older turns with a **server-written summary** in a `compaction` block. Anthropic recommends it for most long-running conversations. Two forms: **on demand** (beta `compact-2026-09-04`, you decide when) and **at a token threshold** (beta `compact-2026-01-12`, edit `compact_20260112`).",
+        "Threshold compaction: `trigger` defaults to `{input_tokens: 150000}`, minimum value **50,000**; `pause_after_compaction` (stop with `stop_reason: \"compaction\"`), and `instructions` which **replaces** the default summarization prompt entirely. The API ignores all blocks before the last compaction block.",
+        "**Billing**: compaction is an extra sampling step. Top-level `usage.input_tokens/output_tokens` **exclude** the compaction iteration; **sum `usage.iterations`** to get total billed tokens (also what counts for rate limits). Reapplying an existing compaction block costs nothing extra.",
+        "Cache the summary by putting `cache_control` on the compaction block, and keep a breakpoint at the end of the system prompt so a compaction only writes the new summary.",
+        "In Claude Code, `/compact` (with optional focus instructions) and auto-compaction do the same job; compacting a large context is itself a large request, whereas `/clear` is free."
+      ],
+      "examTips": [
+        "Compaction summary vs context editing: compaction summarizes (lossy, model-written); context editing deletes by rule (tool results, thinking).",
+        "Billing trap: reading only top-level usage under-reports compaction cost; sum usage.iterations.",
+        "Both strategies break the prompt cache at the point of change; clear_at_least (editing) and caching the summary (compaction) mitigate it."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/compaction-threshold",
+      "example": {
+        "title": "Compaction usage and true cost",
+        "language": "python",
+        "code": "resp = client.beta.messages.create(\n    betas=[\"compact-2026-01-12\"], model=\"claude-opus-5-5\", max_tokens=4096,\n    messages=messages,\n    context_management={\"edits\": [{\"type\": \"compact_20260112\",\n                                   \"trigger\": {\"type\": \"input_tokens\", \"value\": 150000}}]},\n)\nmessages.append({\"role\": \"assistant\", \"content\": resp.content})  # keep compaction block\n\n# usage.iterations example:\n#  [{\"type\":\"compaction\",\"input_tokens\":180000,\"output_tokens\":3500},\n#   {\"type\":\"message\",   \"input_tokens\": 23000,\"output_tokens\":1000}]\ntin  = sum(i[\"input_tokens\"]  for i in resp.usage.iterations)   # 203,000\ntout = sum(i[\"output_tokens\"] for i in resp.usage.iterations)   # 4,500\ncost = (tin*4 + tout*20)/1e6   # Opus 5.5 -> $0.812 + $0.090 = $0.902 (top-level only would show $0.112)"
+      }
+    },
+    {
+      "heading": "Rate limits: RPM, ITPM, OTPM and spend limits",
+      "notes": [
+        "Messages API limits are **RPM, ITPM, OTPM** per model class, set by **usage tier** (Start, Build, Scale, Custom; new orgs may begin in a lower Evaluation tier). Enforced at the organization level using a **token bucket** (capacity replenishes continuously, not at fixed resets); bursts can trigger 429s even under the per-minute average. Sharp usage spikes can also hit **acceleration limits**.",
+        "**Cache-aware ITPM**: only `input_tokens` and `cache_creation_input_tokens` count toward ITPM; **`cache_read_input_tokens` do not**. With a 2M ITPM limit and an 80% cache hit rate you can effectively process 10M input tokens per minute.",
+        "**OTPM** is measured on actual output generated; **`max_tokens` does not factor in**.",
+        "Example Build-tier limits: Sonnet 5.5 / Opus 5.5 / Haiku 5.5 = 10,000 RPM, 5M ITPM, 1M OTPM; Fable 5.x = 10,000 RPM, 1.5M ITPM, 300k OTPM. Some versions share a pooled bucket (Opus 4.x, Sonnet 4.x, Fable 5.x). Limits are shared across `inference_geo` values; fast mode has separate dedicated limits.",
+        "On 429, honor the **`retry-after`** header. Response headers include `anthropic-ratelimit-{requests,tokens,input-tokens,output-tokens}-{limit,remaining,reset}` (reset in RFC 3339; remaining rounded to nearest thousand).",
+        "**Spend limits** are different from rate limits: tier monthly caps are **Start $500, Build $1,000, Scale $200,000** (Custom has none). Hitting the tier cap returns **429** `rate_limit_error` with `error_code: enforced_spend_limit_reached` and **no `retry-after`** (retries fail until the next month 00:00 UTC). Hitting a limit **you set yourself** (org or workspace) returns **400** `invalid_request_error`.",
+        "**Workspaces** let you set lower per-workspace spend and rate limits (not on the default workspace for spend); unset workspace limits equal the org limit, and org limits always apply. Batch has separate limits. Manage tiers/limits in the Console or read/set via the Rate Limits API."
+      ],
+      "examTips": [
+        "Cache reads are free for ITPM purposes: caching improves throughput as well as cost.",
+        "429 without retry-after + enforced_spend_limit_reached = tier spend cap; do not retry. A self-set limit gives 400, not 429.",
+        "Rate limits are org-level; workspace limits only carve up the org's capacity."
+      ],
+      "source": "https://platform.claude.com/docs/en/api/rate-limits",
+      "example": {
+        "title": "Back-off on 429",
+        "language": "python",
+        "code": "import time, anthropic\nclient = anthropic.Anthropic(max_retries=0)\n\ndef call(**kw):\n    for attempt in range(5):\n        try:\n            return client.messages.create(**kw)\n        except anthropic.RateLimitError as e:\n            ra = e.response.headers.get(\"retry-after\")\n            if ra is None:            # e.g. spend cap: retrying will not help\n                raise\n            time.sleep(float(ra))\n    raise RuntimeError(\"still rate limited\")"
+      }
+    },
+    {
+      "heading": "Usage and Cost APIs (Admin) and monitoring",
+      "notes": [
+        "Programmatic reporting uses the **Admin API** and needs admin credentials (an **`sk-ant-admin01-...` Admin API key**, an `org:admin` OAuth token, or a non-workspace-scoped key). **Workspace API keys do not work.** Unavailable for individual accounts (set up an Organization first).",
+        "Legacy endpoints (still supported): **`/v1/organizations/usage_report/messages`** (tokens, buckets `1m`/`1h`/`1d`, filter/group by model, workspace, API key, service tier, context window, `inference_geo`, `speed`) and **`/v1/organizations/cost_report`** (USD as decimal strings in **cents**, **daily buckets only**, group by `workspace_id` or `description`).",
+        "Newer **Usage and Cost Analytics API** (beta header `anthropic-beta: analytics-usage-cost-2026-08-24`): `GET /v1/organizations/analytics/usage` and `/analytics/cost`, with more grouping dimensions (including the `actor` behind a request) and the recommended path for new integrations.",
+        "Gotchas: **Priority Tier costs are not in the cost endpoint** (use the usage endpoint, group by `service_tier`); code execution cost appears only in the cost report, not the usage report; data typically shows within about 5 minutes; polling once per minute is supported; Console playground usage has `api_key_id` null; default workspace is `workspace_id` null.",
+        "Per-request, in-band tracking: read `usage` from every response (`input_tokens`, `cache_*`, `output_tokens`, `output_tokens_details.thinking_tokens`, `server_tool_use`, and `iterations` with compaction). Use the Console **Usage** and **Cost** pages and the rate-limit charts (which show your cache rate) for dashboards."
+      ],
+      "examTips": [
+        "Admin key required: a normal workspace API key returns an auth error for usage/cost endpoints.",
+        "Cost report = daily granularity only; usage report supports minute/hour/day.",
+        "To attribute spend per team, create a workspace per team and group by workspace_id."
+      ],
+      "source": "https://platform.claude.com/docs/en/manage-claude/usage-cost-api",
+      "example": {
+        "title": "Daily usage by model (legacy usage endpoint)",
+        "language": "bash",
+        "code": "curl \"https://api.anthropic.com/v1/organizations/usage_report/messages?\\\nstarting_at=2025-01-01T00:00:00Z&ending_at=2025-01-08T00:00:00Z&\\\ngroup_by[]=model&bucket_width=1d\" \\\n  -H \"anthropic-version: 2026-10-21\" \\\n  -H \"x-api-key: $ANTHROPIC_ADMIN_KEY\"   # sk-ant-admin01-..."
+      }
+    },
+    {
+      "heading": "Claude Code cost tracking and reduction",
+      "notes": [
+        "Claude Code bills per API token. Docs cite an average of about **$13 per developer per active day** and **$150-250 per developer per month**, with 90% of users under **$30 per active day**.",
+        "**`/usage`** shows the Session block: total cost, API vs wall duration, code changes, per-model tokens (input, output, cache read, cache write) and a prompt-cache line. The dollar figure is **computed locally at list price** (an estimate; admins can apply contracted rates via the `modelPricing` managed setting). Totals reset on `/clear`. On subscription plans (Pro/Max/Ultra) the session dollar figure is not a bill.",
+        "Org controls: **Console**: workspace spend limits plus an auto-created **'Claude Code' workspace**, Console dashboard, Claude Code Analytics API (Admin key). **Teams/Enterprise**: seat allowances, usage credits with limits, spend report. **Bedrock/Vertex/Foundry**: cloud billing console; use **OpenTelemetry** or an LLM gateway for per-user attribution.",
+        "Rate-limit recommendations (per user TPM): 1-5 users 200k-300k; 5-20: 100k-150k; 20-50: 50k-75k; 50-100: 25k-35k; 100-500: 15k-20k; 500+: 10k-15k. Limits apply at the **organization** level, so individuals can burst above their share.",
+        "Reduce tokens: **`/clear`** between unrelated tasks, **`/compact`** with focus instructions, choose Sonnet over Opus for most work and Haiku for simple subagents, lower **`/effort`**, disable unused MCP servers, keep **CLAUDE.md under about 200 lines** (move workflows to skills), use hooks to filter verbose output, delegate noisy work to subagents, use plan mode, and write specific prompts.",
+        "Why long sessions cost more: the full conversation is sent each request (read at the cache rate), a first message after the cache lifetime misses and reprocesses everything, and scheduled tasks, subagents and agent teams (about **7x** tokens in plan mode) all add requests. Prompt caching and auto-compaction are automatic."
+      ],
+      "examTips": [
+        "/usage cost is a local list-price estimate; authoritative billing is the Console Cost page or your cloud bill.",
+        "Console customers cap Claude Code with workspace spend limits; Bedrock/Vertex customers use cloud budgets plus OpenTelemetry/gateway.",
+        "Biggest levers: clear between tasks, right-size the model, lower effort, trim CLAUDE.md and MCP."
+      ],
+      "source": "https://code.claude.com/docs/en/costs",
+      "example": {
+        "title": "Typical /usage output and a workspace limit workflow",
+        "language": "text",
+        "code": "/usage\nTotal cost:            $0.55\nUsage by model:\n   claude-sonnet-4-6:  1.2k input, 5.3k output, 940.0k cache read, 50.0k cache write ($0.55)\n\nTeam rollout: Console -> Workspaces -> 'Claude Code' -> set spend limit + workspace rate limit\nPer-user numbers: Claude Code Analytics API (Admin key) or OpenTelemetry"
+      }
+    },
+    {
+      "heading": "Worked cost calculations",
+      "notes": [
+        "All numbers below use rates quoted in the Anthropic pricing page. Remember $ per million tokens: cost = tokens / 1,000,000 x rate.",
+        "**A. Caching a shared prompt (Sonnet 5.5: $2 in, $10 out, 5m write $2.50, read $0.10).** 100 requests, each with a 50,000-token shared prefix, 500 new input tokens and 800 output tokens, all within 5 minutes of each other. No caching: input 5.05M x $2 = $10.10, output 0.08M x $10 = $0.80, total **$10.90**. With caching: 1 write 0.05M x $2.50 = $0.125; 99 reads 4.95M x $0.10 = $0.495; uncached 0.05M x $2 = $0.10; output $0.80; total **$1.52** (about 86% cheaper).",
+        "**B. Batch (Sonnet 5.5 batch: $1 in, $5 out).** 10,000 requests x 2,000 input + 500 output tokens: standard = 20M x $2 + 5M x $10 = $90; batch = 20M x $1 + 5M x $5 = **$45**.",
+        "**C. Batch + 1h cache (best case).** In B, 1,500 of each 2,000 input tokens are a shared prefix cached with 1h TTL. Batch rates: 1h write = $4 x 0.5 = $2/M, read = $0.10 x 0.5 = $0.05/M. One write 1,500 x $2/M = $0.003; 9,999 reads = 14.9985M x $0.05 = $0.75; uncached 5M x $1 = $5; output 5M x $5 = $25; total about **$30.75** vs $45 (hits are best effort in batches).",
+        "**D. Thinking cost (Opus 5.5: $4 in, $20 out).** A request with 25 input tokens and `output_tokens` 8,000 (6,500 thinking): cost = 25 x $4/M + 8,000 x $20/M = **about $0.16**; the visible summary does not reduce this.",
+        "**E. Compaction (Opus 5.5).** Iterations: compaction 180,000 in / 3,500 out; message 23,000 in / 1,000 out. Total = 203,000 x $4/M + 4,500 x $20/M = $0.812 + $0.090 = **$0.902**, versus only $0.112 if you read just the top-level `usage`.",
+        "**F. Rate limit headroom.** Build tier Sonnet 5.5 ITPM = 5M. If 90% of input is cache reads, uncached traffic is 10% of total, so you can send about 50M total input tokens per minute before ITPM binds (RPM and OTPM may bind first)."
+      ],
+      "examTips": [
+        "Always compute total input as read + creation + input_tokens before judging a request's size.",
+        "Stack multipliers in this order of thought: model rate, cache multiplier, then x0.5 batch and x1.1 US-only.",
+        "Break-even questions: 5m write needs 1 read, 1h write needs 2 reads (at the standard 0.1x read)."
+      ],
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "example": {
+        "title": "Cost calculator helper",
+        "language": "python",
+        "code": "RATES = {  # $/MTok: in, out, write5m, write1h, read\n  \"sonnet-5.5\": (2.0, 10.0, 2.5, 4.0, 0.10),\n  \"opus-5.5\":   (4.0, 20.0, 5.0, 8.0, 0.20),\n  \"haiku-4.5\":  (1.0,  5.0, 1.25, 2.0, 0.10),\n}\ndef cost(model, usage, batch=False):\n    i,o,w5,w1,r = RATES[model]\n    cc = usage.get(\"cache_creation\", {})\n    c = (usage[\"input_tokens\"]*i + usage[\"output_tokens\"]*o\n         + cc.get(\"ephemeral_5m_input_tokens\",0)*w5\n         + cc.get(\"ephemeral_1h_input_tokens\",0)*w1\n         + usage[\"cache_read_input_tokens\"]*r) / 1e6\n    return c*0.5 if batch else c"
+      }
+    }
+  ],
+  "keyTakeaways": [
+    "Cache multipliers vs base input: 5m write 1.25x, 1h write 2x, read 0.1x (0.05x on Opus 5.5 and Sonnet 5.5, 0.025x on Fable/Mythos 5.1).",
+    "Max 4 cache breakpoints per request; lookback checks at most 20 positions; 1h entries must precede 5m entries.",
+    "Cache order is tools -> system -> messages; a change invalidates its level and all later levels, and tool changes invalidate everything.",
+    "Minimum cacheable tokens: 512 (Opus/Sonnet 5.5, Haiku 5.5, Fable/Mythos), 1,024 (Sonnet 4.6/5), 2,048 (Opus 4.7), 4,096 (Opus 4.5/4.6, Haiku 4.5); below it, no caching and no error.",
+    "Total input = cache_read + cache_creation + input_tokens; input_tokens is only what follows the last breakpoint.",
+    "Batch API: 50% off input and output, 100,000 requests or 256 MB per batch, 24h expiry, results kept 29 days, stacks with caching (use 1h TTL).",
+    "count_tokens is free, an estimate, separately rate limited, and ignores caching; newer tokenizers (4.7+) give about 30% more tokens.",
+    "max_tokens is a hard output cap including thinking; it does not count toward OTPM; stop_reason max_tokens means truncation.",
+    "Thinking tokens are billed as full output tokens (not the summary); see usage.output_tokens_details.thinking_tokens; effort changes invalidate message caches.",
+    "Compaction bills an extra iteration: sum usage.iterations for true cost; context editing and compaction both break the cached prefix.",
+    "Only uncached input and cache writes count toward ITPM; honor retry-after on 429; spend cap 429 has no retry-after; self-set limits return 400.",
+    "Usage/Cost Admin API needs an Admin key (sk-ant-admin01...), cost report is daily only and excludes Priority Tier; /usage in Claude Code is a local list-price estimate."
+  ],
+  "glossary": [
+    {
+      "term": "MTok",
+      "definition": "One million tokens; the unit prices are quoted in."
+    },
+    {
+      "term": "Cache breakpoint",
+      "definition": "A cache_control marker on a block (or the automatic top-level field) where a prefix is written to and read from the cache; up to 4 per request."
+    },
+    {
+      "term": "Automatic caching",
+      "definition": "A single top-level cache_control field that moves the breakpoint forward as the conversation grows."
+    },
+    {
+      "term": "TTL",
+      "definition": "Cache lifetime: 5 minutes by default or 1 hour with ttl: 1h; refreshed free on each hit."
+    },
+    {
+      "term": "Cache read (hit)",
+      "definition": "Reading a cached prefix, billed at 0.1x base input by default (0.05x or 0.025x on some models)."
+    },
+    {
+      "term": "Lookback window",
+      "definition": "The 20 block positions checked backward from a breakpoint to find an existing cache entry."
+    },
+    {
+      "term": "Pre-warming",
+      "definition": "Sending max_tokens: 0 with a breakpoint to write the cache without billed output."
+    },
+    {
+      "term": "Message Batches API",
+      "definition": "Asynchronous bulk Messages processing at 50% off, with a 24-hour completion window."
+    },
+    {
+      "term": "count_tokens",
+      "definition": "Free endpoint returning an estimated input_tokens count for a prospective request."
+    },
+    {
+      "term": "ITPM / OTPM / RPM",
+      "definition": "Input tokens, output tokens, and requests per minute limits; ITPM excludes cache reads."
+    },
+    {
+      "term": "Token bucket",
+      "definition": "Rate-limit algorithm where capacity replenishes continuously up to a maximum."
+    },
+    {
+      "term": "Adaptive thinking",
+      "definition": "Mode where Claude decides whether and how much to think, steered by output_config.effort."
+    },
+    {
+      "term": "Effort",
+      "definition": "output_config.effort (low to max) soft control over thinking depth and overall token spend."
+    },
+    {
+      "term": "Context editing",
+      "definition": "Server-side rule-based clearing of old tool results or thinking blocks (clear_tool_uses, clear_thinking)."
+    },
+    {
+      "term": "Compaction",
+      "definition": "Server-written summary that replaces older turns in a compaction block; billed via usage.iterations."
+    },
+    {
+      "term": "Admin API key",
+      "definition": "sk-ant-admin01-... credential required for usage and cost reporting endpoints."
+    },
+    {
+      "term": "Workspace",
+      "definition": "Console grouping for API keys with its own spend and rate limits, cache isolation and batches."
+    },
+    {
+      "term": "inference_geo",
+      "definition": "Request parameter for data residency; us applies a 1.1x multiplier on Claude 4.6+ models."
+    }
+  ],
+  "quiz": [
+    {
+      "q": "A team sends 200 requests over 4 minutes, each reusing an identical 30,000-token system prompt on Sonnet 5.5. They add one `cache_control` breakpoint at the end of the system prompt with the default TTL. Compared with no caching, what happens to the cost of that prefix?",
+      "options": [
+        "It rises, because every request pays a 1.25x write",
+        "It falls: one 1.25x write then reads at 0.05x base input",
+        "It falls: every request is billed at 0.5x for the prefix",
+        "It is unchanged until the 1-hour TTL is selected"
+      ],
+      "answer": 1,
+      "explanation": "One request writes the prefix at 1.25x (5m TTL); the other 199 within the 5-minute window (refreshed by each hit) read it at the Sonnet 5.5 read rate of 0.05x. 0.5x is the batch discount, not caching; TTL choice is unnecessary when requests arrive more often than every 5 minutes.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-caching"
+    },
+    {
+      "q": "A developer enables caching on Claude Haiku 4.5 with a 2,500-token system prompt. Responses show cache_creation_input_tokens 0 and cache_read_input_tokens 0 and no error. What is the most likely cause?",
+      "options": [
+        "Haiku 4.5 does not support prompt caching",
+        "The prompt is below Haiku 4.5's 4,096-token minimum, so it was processed uncached silently",
+        "cache_control must be placed on the user message, not the system prompt",
+        "The 5-minute TTL expired before the first request"
+      ],
+      "answer": 1,
+      "explanation": "Haiku 4.5 requires at least 4,096 tokens to cache. Shorter prompts are processed normally with no error and zero creation/read counts. Haiku 4.5 supports caching; system prompts can carry cache_control; TTL is irrelevant on the first request.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-caching"
+    },
+    {
+      "q": "An agent reads cache hits for a while, then a developer edits one parameter description in a tool definition. What is the effect on the next request?",
+      "options": [
+        "Only the messages-level cache is invalidated",
+        "Only the tools-level cache is invalidated",
+        "Tools, system and messages caches are all invalidated, so the whole prefix is re-written",
+        "Nothing; tool descriptions are not part of the cached prefix"
+      ],
+      "answer": 2,
+      "explanation": "Cache order is tools -> system -> messages, and a change at a level invalidates that level and everything after it. Tool definition changes therefore invalidate all three.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-caching"
+    },
+    {
+      "q": "A response shows input_tokens 60, cache_read_input_tokens 120,000 and cache_creation_input_tokens 4,000. How many total input tokens did the request contain?",
+      "options": [
+        "60",
+        "4,060",
+        "120,060",
+        "124,060"
+      ],
+      "answer": 3,
+      "explanation": "Total input = cache_read + cache_creation + input_tokens = 120,000 + 4,000 + 60 = 124,060. input_tokens counts only tokens after the last breakpoint.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-caching"
+    },
+    {
+      "q": "A nightly job summarizes 50,000 documents sharing a long instruction block. Latency does not matter and results are needed by morning. Which design minimizes cost?",
+      "options": [
+        "Synchronous Messages calls with fast mode",
+        "Message Batches with the shared block cached using the 1-hour TTL",
+        "Message Batches with max_tokens set to 0 to pre-warm the cache",
+        "Synchronous calls with the 5-minute TTL and no batching"
+      ],
+      "answer": 1,
+      "explanation": "Batch gives 50% off input and output and stacks with caching; batches can take longer than 5 minutes, so the 1h TTL improves hit odds. Fast mode costs more and is unavailable with batch; max_tokens 0 is not allowed in batches.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/batch-processing"
+    },
+    {
+      "q": "Which statement about the Message Batches API is correct?",
+      "options": [
+        "Results always return in the same order as the requests",
+        "Canceled or expired requests are still billed at the batch rate",
+        "A batch is limited to 100,000 requests or 256 MB, and results can be downloaded for 29 days",
+        "Batches never expire; processing continues until complete"
+      ],
+      "answer": 2,
+      "explanation": "The limits are 100,000 requests or 256 MB, with results retained 29 days. Results may arrive in any order (use custom_id), canceled/expired requests are not billed, and batches expire after 24 hours.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/batch-processing"
+    },
+    {
+      "q": "Before migrating a prompt from Claude Sonnet 4.6 to Claude Opus 5.5, an engineer wants an accurate input-cost estimate. What should they do?",
+      "options": [
+        "Reuse the token count from Sonnet 4.6, since tokenizers are identical",
+        "Multiply the old count by 0.5",
+        "Call count_tokens with the Opus 5.5 model ID; the newer tokenizer yields about 30% more tokens",
+        "Call count_tokens with cache_control blocks to measure cached cost"
+      ],
+      "answer": 2,
+      "explanation": "Claude 4.7+ models use a tokenizer producing roughly 30% more tokens, so count against the target model. count_tokens is free but does not apply caching logic.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/token-counting"
+    },
+    {
+      "q": "A request to the Messages API uses web search and the developer also calls count_tokens with the same tools to pre-estimate cost. What happens?",
+      "options": [
+        "It works and includes search fees",
+        "It returns invalid_request_error because server tools such as web search are unsupported in count_tokens",
+        "It works but counts double",
+        "It silently drops the tool"
+      ],
+      "answer": 1,
+      "explanation": "count_tokens rejects server tools (web search, web fetch, code execution, tool search), MCP connector and url/file image or document sources. Use the Messages response usage for those.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/token-counting"
+    },
+    {
+      "q": "A developer sets max_tokens to 64,000 'to be safe' and worries it will exhaust their output-tokens-per-minute limit. Which is accurate?",
+      "options": [
+        "OTPM is estimated from max_tokens at request start, so large values reduce headroom",
+        "OTPM counts only tokens actually generated; max_tokens does not factor in, though it caps output and thinking together",
+        "max_tokens above 4,096 is billed in full regardless of output",
+        "Large max_tokens disables caching"
+      ],
+      "answer": 1,
+      "explanation": "The docs state max_tokens does not factor into OTPM; only generated tokens count. It is a hard cap on output (thinking included) and you are billed only for tokens produced.",
+      "source": "https://platform.claude.com/docs/en/api/rate-limits"
+    },
+    {
+      "q": "A Claude Opus 5.5 call with adaptive thinking returns output_tokens 9,000, of which usage.output_tokens_details.thinking_tokens is 7,000, though the visible summarized thinking is only about 600 tokens. Which tokens are billed at the output rate?",
+      "options": [
+        "Only the 2,000 non-thinking tokens",
+        "The 2,000 answer tokens plus 600 visible summary tokens",
+        "All 9,000 output tokens",
+        "9,000 tokens at the input rate"
+      ],
+      "answer": 2,
+      "explanation": "Thinking is billed as output at the full internally generated amount, not the summary; output_tokens (9,000) is the authoritative billed total. display omitted or summarized does not change billing.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/thinking-steering-and-cost"
+    },
+    {
+      "q": "A multi-turn app on Opus 5.5 with message-level caching alternates effort between 'high' and 'low' per turn and sees constant cache misses. What is the best fix?",
+      "options": [
+        "Increase the cache TTL to 1 hour",
+        "Keep one top-level effort for the conversation and steer per message with prompting or per-message effort",
+        "Disable adaptive thinking and set budget_tokens each turn",
+        "Add more cache breakpoints"
+      ],
+      "answer": 1,
+      "explanation": "Changing the resolved effort value changes the prompt rendering and invalidates message-level breakpoints. Per-message steering or the beta per-message effort change leaves earlier breakpoints intact. TTL and extra breakpoints do not help, and 4.7+ models reject budget_tokens.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/thinking-steering-and-cost"
+    },
+    {
+      "q": "With threshold compaction enabled, a response's top-level usage shows 23,000 input and 1,000 output tokens, but usage.iterations also lists a compaction entry of 180,000 input and 3,500 output. What should billing use?",
+      "options": [
+        "Only the top-level numbers",
+        "Only the compaction iteration",
+        "The sum across all iterations: 203,000 input and 4,500 output",
+        "Zero for the compaction iteration because compaction is free"
+      ],
+      "answer": 2,
+      "explanation": "Top-level usage excludes compaction iterations; compaction is an extra sampling step that is billed and counts toward rate limits, so sum usage.iterations.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/compaction-threshold"
+    },
+    {
+      "q": "An agent using context editing with clear_tool_uses sees poor cache hit rates because clears happen every few turns and free little space. Which setting best addresses this?",
+      "options": [
+        "Lower keep to 0",
+        "Set clear_at_least so a clear only runs when it frees enough tokens to justify the cache re-write",
+        "Add exclude_tools for every tool",
+        "Switch trigger to tool_uses with value 1"
+      ],
+      "answer": 1,
+      "explanation": "Clearing invalidates the cached prefix; clear_at_least requires a minimum number of tokens to be cleared (otherwise the strategy is not applied), making each cache invalidation worthwhile.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/context-editing"
+    },
+    {
+      "q": "An org on the Build tier gets HTTP 429 rate_limit_error with details.error_code 'enforced_spend_limit_reached' and no retry-after header. What is the correct response?",
+      "options": [
+        "Retry with exponential back-off until it succeeds",
+        "Retry after raising max_tokens",
+        "This is the tier's monthly spend cap: stop retrying; raise the tier or wait until 00:00 UTC next month",
+        "Switch to the Batch API to bypass limits"
+      ],
+      "answer": 2,
+      "explanation": "Tier spend caps (Start $500, Build $1,000, Scale $200,000) pause usage until next month and the 429 carries no retry-after, so retries fail. A self-set limit instead returns 400 invalid_request_error.",
+      "source": "https://platform.claude.com/docs/en/api/rate-limits"
+    },
+    {
+      "q": "A Scale-tier org has a 2M ITPM limit on a model and an 80% cache hit rate. Roughly how much total input can it process per minute before ITPM binds?",
+      "options": [
+        "2M",
+        "4M",
+        "10M",
+        "20M"
+      ],
+      "answer": 2,
+      "explanation": "Only uncached input and cache writes count toward ITPM; cache reads do not. With 80% reads, 2M uncached represents 20% of total, so total = 10M.",
+      "source": "https://platform.claude.com/docs/en/api/rate-limits"
+    },
+    {
+      "q": "A finance team wants daily USD cost grouped by workspace through the API. Which is correct?",
+      "options": [
+        "Call /v1/organizations/cost_report with an Admin API key, grouped by workspace_id (daily buckets only)",
+        "Call /v1/messages/count_tokens with a workspace key",
+        "Call /v1/organizations/cost_report with a standard workspace API key hourly",
+        "Query Priority Tier costs from the cost endpoint"
+      ],
+      "answer": 0,
+      "explanation": "Cost reporting needs Admin credentials (sk-ant-admin01...); workspace keys do not work. The cost report supports daily granularity only and excludes Priority Tier costs, which appear in the usage endpoint by service_tier.",
+      "source": "https://platform.claude.com/docs/en/manage-claude/usage-cost-api"
+    },
+    {
+      "q": "A Claude Code user on the API sees 'Total cost' in /usage. Which statement is correct?",
+      "options": [
+        "It is the exact invoiced amount",
+        "It is computed locally from token counts at list price unless an admin configured modelPricing; authoritative billing is in the Console or cloud bill",
+        "It includes only output tokens",
+        "It persists across /clear"
+      ],
+      "answer": 1,
+      "explanation": "Claude Code estimates the figure locally at list price (or configured contracted rates). Totals reset on /clear, and authoritative billing lives in the Console Cost page or your cloud provider.",
+      "source": "https://code.claude.com/docs/en/costs"
+    },
+    {
+      "q": "An enterprise runs Claude Code through Amazon Bedrock and wants per-developer cost attribution. Which is supported?",
+      "options": [
+        "The Claude Code Analytics API automatically covers Bedrock usage",
+        "OpenTelemetry export or an LLM gateway that tracks spend per key",
+        "The Console 'Claude Code' workspace spend limits",
+        "Admin API usage_report with a workspace key"
+      ],
+      "answer": 1,
+      "explanation": "On Bedrock, Vertex or Foundry, Anthropic dashboards and the Claude Code Analytics API do not cover usage; spend lives in the cloud billing console, with OpenTelemetry or a gateway for per-user numbers.",
+      "source": "https://code.claude.com/docs/en/costs"
+    }
+  ]
+}

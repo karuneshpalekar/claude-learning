@@ -1,0 +1,729 @@
+{
+  "slug": "agent-construction",
+  "title": "Agent Construction",
+  "overview": "This objective covers how you actually build an agent on Claude: writing your own tool-use loop on the Messages API, letting the SDK tool runner drive it, using the Claude Agent SDK (the Claude Code agent loop as a library), or handing the whole harness to Anthropic with Managed Agents. It also covers the controls that make agents safe and bounded: custom tools, system prompts, subagents, permissions, hooks, sessions, MCP, turn and budget limits, and error handling. The exam tests whether you can pick the right construction approach for a scenario and know the exact option names, result subtypes and event flows.",
+  "sources": [
+    {
+      "title": "Agent SDK overview",
+      "url": "https://code.claude.com/docs/en/agent-sdk/overview"
+    },
+    {
+      "title": "How the agent loop works (Agent SDK)",
+      "url": "https://code.claude.com/docs/en/agent-sdk/agent-loop"
+    },
+    {
+      "title": "Give Claude custom tools (Agent SDK)",
+      "url": "https://code.claude.com/docs/en/agent-sdk/custom-tools"
+    },
+    {
+      "title": "Subagents in the SDK",
+      "url": "https://code.claude.com/docs/en/agent-sdk/subagents"
+    },
+    {
+      "title": "Configure permissions (Agent SDK)",
+      "url": "https://code.claude.com/docs/en/agent-sdk/permissions"
+    },
+    {
+      "title": "Intercept and control agent behavior with hooks",
+      "url": "https://code.claude.com/docs/en/agent-sdk/hooks"
+    },
+    {
+      "title": "Work with sessions (Agent SDK)",
+      "url": "https://code.claude.com/docs/en/agent-sdk/sessions"
+    },
+    {
+      "title": "Connect to external tools with MCP (Agent SDK)",
+      "url": "https://code.claude.com/docs/en/agent-sdk/mcp"
+    },
+    {
+      "title": "Modifying system prompts (Agent SDK)",
+      "url": "https://code.claude.com/docs/en/agent-sdk/modifying-system-prompts"
+    },
+    {
+      "title": "Define tools (Messages API)",
+      "url": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools"
+    },
+    {
+      "title": "Handle tool calls (Messages API)",
+      "url": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls"
+    },
+    {
+      "title": "Tool runner (SDK)",
+      "url": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-runner"
+    },
+    {
+      "title": "Parallel tool use",
+      "url": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/parallel-tool-use"
+    },
+    {
+      "title": "Handling stop reasons",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons"
+    },
+    {
+      "title": "Claude API errors",
+      "url": "https://platform.claude.com/docs/en/api/errors"
+    },
+    {
+      "title": "Claude Managed Agents overview",
+      "url": "https://platform.claude.com/docs/en/managed-agents/overview"
+    },
+    {
+      "title": "Managed Agents quickstart",
+      "url": "https://platform.claude.com/docs/en/managed-agents/quickstart"
+    },
+    {
+      "title": "Managed Agents tools",
+      "url": "https://platform.claude.com/docs/en/managed-agents/tools"
+    },
+    {
+      "title": "Managed Agents permission policies",
+      "url": "https://platform.claude.com/docs/en/managed-agents/permission-policies"
+    },
+    {
+      "title": "Managed Agents session event stream",
+      "url": "https://platform.claude.com/docs/en/managed-agents/events-and-streaming"
+    },
+    {
+      "title": "Managed Agents session budgets",
+      "url": "https://platform.claude.com/docs/en/managed-agents/budgets"
+    },
+    {
+      "title": "Managed Agents: define your agent",
+      "url": "https://platform.claude.com/docs/en/managed-agents/agent-setup"
+    }
+  ],
+  "sections": [
+    {
+      "heading": "Four ways to build an agent: which one when",
+      "notes": [
+        "**Messages API (Client SDK)**: you call the model directly and write the tool loop yourself. Maximum control, you own tool execution, state, and the stop conditions.",
+        "**Tool runner (beta, in the Client SDK)**: the SDK runs the loop for you over tools you define in code. Still the Messages API underneath, in your process, with `max_iterations` to bound it.",
+        "**Claude Agent SDK**: a library (Python and TypeScript) that embeds Claude Code's agent loop, built-in tools (Read, Edit, Bash, Glob, Grep, WebSearch, WebFetch...), permissions, sessions, hooks, subagents and MCP in a process you operate.",
+        "**Managed Agents (beta)**: Anthropic hosts the agent harness. You define an agent, an environment (cloud sandbox or self-hosted sandbox) and a session, then exchange events. Best for long-running, asynchronous work with minimal infrastructure.",
+        "Rule of thumb: custom agent loops and fine-grained control = Messages API; coding-agent capabilities in your own app = Agent SDK; hosted harness and sandbox for long async tasks = Managed Agents. To drive the Agent SDK loop from another language, run the CLI as a subprocess with `-p` and `--output-format json`.",
+        "Agent SDK auth: use API key authentication. Third-party developers may not offer claude.ai login or rate limits for products built on the Agent SDK unless previously approved."
+      ],
+      "examTips": [
+        "Scenario keywords: 'we want to own the loop / log and approve every call in our own code' points to Messages API manual loop; 'Claude Code's tools in our app' points to Agent SDK; 'Anthropic runs it in a sandbox, hours-long task' points to Managed Agents.",
+        "The Agent SDK is not just a thin wrapper over the Messages API: it ships built-in tool execution. With the Messages API you must execute every tool yourself.",
+        "Managed Agents requires the beta header `managed-agents-2026-04-01` (the SDK sets it automatically) and is not eligible for Zero Data Retention."
+      ],
+      "source": "https://code.claude.com/docs/en/agent-sdk/overview"
+    },
+    {
+      "heading": "The Messages API agent loop (manual)",
+      "notes": [
+        "An agent loop on the Messages API: send `messages` + `tools`, inspect `stop_reason`. If it is `tool_use`, execute every `tool_use` block, append the assistant message, then append ONE user message containing the `tool_result` blocks, and call the API again. Repeat until `stop_reason` is not `tool_use` (usually `end_turn`).",
+        "A `tool_use` block has `id`, `name`, `input`. A `tool_result` block has `tool_use_id` (must match the `id`), optional `content` (string or content blocks: text, image, document, search_result) and optional `is_error`.",
+        "Formatting rules that cause 400 errors: tool results must come in the user message immediately after the assistant `tool_use` message; `tool_result` blocks must come FIRST in the content array, any text after them; answer every `tool_use` block; keep the same `tools` array on continuation requests.",
+        "Claude often emits a text block before the `tool_use` block ('I'll check the weather...'). Do not rely on specific text formats.",
+        "Tool results can carry untrusted content (web pages, email). Keep them inside `tool_result` blocks, not in the system prompt, to limit indirect prompt injection.",
+        "The loop is yours, so YOU must add the safety rails: an iteration cap, token/cost tracking, timeouts, and handling of `max_tokens`, `pause_turn` and `refusal`."
+      ],
+      "example": {
+        "title": "Minimal manual tool loop with an iteration cap (Python)",
+        "language": "python",
+        "code": "import anthropic\nclient = anthropic.Anthropic()\n\ntools = [{\n    \"name\": \"get_weather\",\n    \"description\": \"Get the current weather for a city. Use when the user asks about current conditions. Returns temperature and conditions only.\",\n    \"input_schema\": {\n        \"type\": \"object\",\n        \"properties\": {\"location\": {\"type\": \"string\", \"description\": \"City and state, e.g. San Francisco, CA\"}},\n        \"required\": [\"location\"],\n    },\n}]\n\nmessages = [{\"role\": \"user\", \"content\": \"What's the weather in Paris?\"}]\nMAX_TURNS = 10\n\nfor _ in range(MAX_TURNS):\n    response = client.messages.create(\n        model=\"claude-sonnet-5-5\", max_tokens=1024, tools=tools, messages=messages\n    )\n    if response.stop_reason != \"tool_use\":\n        break\n    messages.append({\"role\": \"assistant\", \"content\": response.content})\n    results = []\n    for block in response.content:\n        if block.type == \"tool_use\":\n            try:\n                out = run_tool(block.name, block.input)   # your code\n                results.append({\"type\": \"tool_result\", \"tool_use_id\": block.id, \"content\": out})\n            except Exception as e:\n                results.append({\"type\": \"tool_result\", \"tool_use_id\": block.id,\n                                \"content\": f\"Error: {e}. Check the city name and retry.\", \"is_error\": True})\n    messages.append({\"role\": \"user\", \"content\": results})   # results only, no text first\n"
+      },
+      "examTips": [
+        "Roles: there is no 'tool' role in the Claude API. Tool results go in a `user` message as `tool_result` blocks.",
+        "Text before a `tool_result` in the same user message is an error; text after is fine when only client tools were called.",
+        "If the continuation returns an empty `end_turn` response, usually you appended text right after the tool results. Remove it rather than resending the empty response."
+      ],
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls"
+    },
+    {
+      "heading": "Defining custom tools (Messages API) and tool_choice",
+      "notes": [
+        "A client tool definition has `name` (regex `^[a-zA-Z0-9_-]{1,128}$`), `description`, `input_schema` (JSON Schema object), and optional `input_examples`. Optional properties include `cache_control`, `strict`, `defer_loading`, `allowed_callers`.",
+        "Descriptions are the single most important factor: say what the tool does, when to use it and when not to, what each parameter means, and caveats. Aim for 3-4+ sentences.",
+        "Consolidate related operations into fewer tools with an `action` parameter; namespace names by service (`github_list_prs`); return only high-signal fields and stable identifiers.",
+        "`input_examples` must validate against `input_schema` (else 400); they cost tokens and are not supported for server tools or computer/browser toolsets.",
+        "`tool_choice`: `auto` (default when tools present), `any` (must use some tool), `tool` (must use the named tool), `none`. With `any`/`tool` the API prefills the assistant turn, so no text precedes the `tool_use`, and thinking is skipped.",
+        "Some models (Claude Opus 5.5, Sonnet 5.5, Fable 5.1, Mythos 5.1) return a 400 for `any`/`tool`. Use `auto` plus `strict: true` tools (schema-valid inputs) or structured outputs instead.",
+        "Changing `tool_choice` invalidates cached message blocks (tools and system prompt stay cached).",
+        "Parameters that ask Claude for 'reasoning' can trigger a `reasoning_extraction` refusal; ask for a short explanation or evidence instead."
+      ],
+      "example": {
+        "title": "Tool definition with input_examples",
+        "language": "json",
+        "code": "{\n  \"name\": \"get_weather\",\n  \"description\": \"Get the current weather in a given location. Returns temperature and conditions. Does not return forecasts.\",\n  \"input_schema\": {\n    \"type\": \"object\",\n    \"properties\": {\n      \"location\": {\"type\": \"string\", \"description\": \"The city and state, e.g. San Francisco, CA\"},\n      \"unit\": {\"type\": \"string\", \"enum\": [\"celsius\", \"fahrenheit\"]}\n    },\n    \"required\": [\"location\"]\n  },\n  \"input_examples\": [\n    {\"location\": \"San Francisco, CA\", \"unit\": \"fahrenheit\"},\n    {\"location\": \"New York, NY\"}\n  ]\n}"
+      },
+      "examTips": [
+        "Poor tool selection or bad parameters: first fix the `description`, then add `input_examples`, then consider `strict: true`. Not a larger model.",
+        "Forced tool use and the newest models: if a scenario forces `tool_choice` `any`/`tool` on Opus 5.5 / Sonnet 5.5 it will 400; the fix is `auto` + strict tool use."
+      ],
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools"
+    },
+    {
+      "heading": "Parallel tool use, stop reasons and the tool runner",
+      "notes": [
+        "By default Claude may emit several `tool_use` blocks in one assistant turn. You choose how to run them (concurrently for independent read-only calls, sequentially for side effects) but ALL results must go back in a SINGLE user message, tool results first.",
+        "Disable parallelism with `tool_choice: {\"type\": \"auto\", \"disable_parallel_tool_use\": true}` (at most one tool per response). It lives inside `tool_choice`, not as a top-level parameter. With `any`/`tool` it means exactly one tool.",
+        "`stop_reason` values: `end_turn`, `max_tokens` (raise limit or continue; an incomplete `tool_use` block means retry with a higher limit), `stop_sequence`, `tool_use` (run tools), `pause_turn` (server-tool loop hit its iteration limit, default 10: append the assistant content unchanged and re-send), `refusal` (a normal HTTP 200, not an error), `model_context_window_exceeded` (treat as truncated).",
+        "**Tool runner** (beta): `client.beta.messages.tool_runner(...)` with `@beta_tool` (Python, derives the schema from type hints and docstring), `betaZodTool()` / `betaTool()` (TypeScript). The runner executes tools, appends results, and loops until Claude returns a message with no tool use or `max_iterations` is reached. Iterate for each message, or use `runner.until_done()` for the final message.",
+        "If a tool function raises, the tool runner catches it and sends a `tool_result` with `is_error: true` containing the exception message, so Claude can recover. Python logs the full stack trace; set `ANTHROPIC_LOG` to see SDK logs in Python, TypeScript and Java.",
+        "Use the manual loop (not the runner) when you need human-in-the-loop approval, custom logging or conditional execution. If you take over message history inside the runner, you must keep the conversation valid and still pass `max_iterations`.",
+        "Context management: server-side compaction via the `context_management` request parameter works with every SDK's tool runner; the older client-side runner compaction is deprecated."
+      ],
+      "example": {
+        "title": "Tool runner with @beta_tool and max_iterations",
+        "language": "python",
+        "code": "import json\nfrom anthropic import Anthropic, beta_tool\n\nclient = Anthropic()\n\n@beta_tool\ndef get_weather(location: str, unit: str = \"fahrenheit\") -> str:\n    \"\"\"Get the current weather in a given location.\n\n    Args:\n        location: The city and state, e.g. San Francisco, CA\n        unit: Temperature unit, either 'celsius' or 'fahrenheit'\n    \"\"\"\n    return json.dumps({\"temperature\": \"20C\", \"condition\": \"Sunny\"})\n\nrunner = client.beta.messages.tool_runner(\n    model=\"claude-sonnet-5-5\",\n    max_tokens=1024,\n    tools=[get_weather],\n    max_iterations=10,   # bound the loop\n    messages=[{\"role\": \"user\", \"content\": \"Weather in Paris?\"}],\n)\nfinal = runner.until_done()\n"
+      },
+      "examTips": [
+        "Results for parallel calls: one user message, all `tool_result` blocks, none before text. Sending each result in its own user message degrades or breaks parallelism.",
+        "`pause_turn` is for SERVER tools (web search etc.). `tool_use` is for CLIENT tools you execute.",
+        "A `refusal` is HTTP 200 with `stop_reason: refusal`; errors (4xx/5xx) carry no stop_reason.",
+        "The tool runner is the answer when the question says 'least code' for a loop over your own tools; the manual loop is the answer when it says 'approve each call' or 'custom control'."
+      ],
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-runner"
+    },
+    {
+      "heading": "The Claude Agent SDK loop: query(), messages and results",
+      "notes": [
+        "`query()` (Python async generator / TypeScript async iterable) runs the full loop: Claude evaluates, requests tools, the SDK executes them (built-in or yours), results feed back, repeat until a response with no tool calls. Both SDKs bundle a native Claude Code binary.",
+        "Message stream: `SystemMessage` (subtype `init` with session metadata, MCP status; also `compact_boundary`), `AssistantMessage` (one content block each), `UserMessage` (tool results), `StreamEvent` (only if partial messages enabled), and finally `ResultMessage`.",
+        "A **turn** is one pass: Claude output, and if it contains tool calls the SDK runs them and feeds results back, all without returning control to your code.",
+        "`ResultMessage.subtype`: `success` (has `result`), `error_max_turns`, `error_max_budget_usd`, `error_during_execution`, `error_max_structured_output_retries`. Every subtype carries `total_cost_usd`, `usage`, `num_turns`, `session_id`. The `result` text exists ONLY on `success`: check subtype first.",
+        "Result also has `stop_reason` (`end_turn`, `max_tokens`, `refusal`...). `usage` covers only the main loop; use `modelUsage` / `model_usage` for whole-tree cost including subagents.",
+        "A single-shot `query()` yields the error result and then RAISES. Wrap the loop in try/except if you need to continue. A streaming-input session stays alive after an error result (except after a session crash).",
+        "Do not break out of the loop on the result message: trailing events such as `prompt_suggestion` can arrive after it.",
+        "Default SDK system prompt is minimal (tool calling only). To get Claude Code's prompt use the `claude_code` preset. Project settings, CLAUDE.md, skills and filesystem hooks load only through `settingSources` / `setting_sources` (default `query()` options include user and project)."
+      ],
+      "example": {
+        "title": "Agent SDK: bounded run with result handling (Python)",
+        "language": "python",
+        "code": "import asyncio\nfrom claude_agent_sdk import query, ClaudeAgentOptions, ResultMessage\n\nasync def run():\n    try:\n        async for message in query(\n            prompt=\"Find and fix the bug causing test failures in the auth module\",\n            options=ClaudeAgentOptions(\n                allowed_tools=[\"Read\", \"Edit\", \"Bash\", \"Glob\", \"Grep\"],\n                setting_sources=[\"project\"],   # load CLAUDE.md, skills, hooks\n                max_turns=30,\n                max_budget_usd=2.0,\n                effort=\"high\",\n            ),\n        ):\n            if isinstance(message, ResultMessage):\n                if message.subtype == \"success\":\n                    print(message.result)\n                elif message.subtype == \"error_max_turns\":\n                    print(\"Out of turns; resume session\", message.session_id)\n                elif message.subtype == \"error_max_budget_usd\":\n                    print(\"Budget hit\")\n                print(\"cost\", message.total_cost_usd)\n    except Exception as e:\n        print(\"Session ended with an error:\", e)\n\nasyncio.run(run())\n"
+      },
+      "examTips": [
+        "`result` is only present on `success`. Reading it on `error_max_turns` is a classic bug.",
+        "`allowed_tools` auto-APPROVES tools; it does not restrict availability. Use `tools` (availability) or bare-name `disallowed_tools` to remove tools from Claude's context.",
+        "Run does not stop on its own? Cap with `max_turns` and `max_budget_usd`; without limits the loop runs until Claude finishes.",
+        "Context accumulates across turns in a session. Automatic compaction emits a `compact_boundary` system message; put persistent rules in CLAUDE.md (re-injected every request), not only in the first prompt."
+      ],
+      "source": "https://code.claude.com/docs/en/agent-sdk/agent-loop"
+    },
+    {
+      "heading": "Custom tools in the Agent SDK (in-process MCP servers)",
+      "notes": [
+        "Define a tool with `@tool` (Python) or `tool()` (TypeScript): name, description, input schema (Zod in TS; dict or full JSON Schema in Python), and an async handler that returns `{content: [...], isError?}`. Wrap tools in `create_sdk_mcp_server` / `createSdkMcpServer` and pass the server in `mcpServers`. The server runs in-process in your app, not as a separate process.",
+        "Fully-qualified name: `mcp__{server_name}__{tool_name}`. List it in `allowedTools` to skip permission prompts; a wildcard `mcp__weather__*` covers the whole server. Characters like `.` or spaces in the server key become `_`.",
+        "Result `content` blocks may be `text`, `image` (base64 `data` + `mimeType`), `audio`, `resource`, `resource_link`. `structuredContent` returns machine-readable JSON (Python's `@tool` forwards only `content` and `is_error`).",
+        "Errors: an uncaught exception does NOT stop the agent loop; the server converts it to an error result with the raw message. Catch errors yourself and return `isError: true` (Python `is_error`) with a helpful message so Claude can retry or explain.",
+        "Annotations are metadata, not enforcement. `readOnlyHint: true` lets Claude run the tool in parallel with other read-only tools; custom tools default to sequential. `destructiveHint` defaults to true.",
+        "TypeScript-only `permission_policy` on a tool (`always_ask` / `always_deny`) forces approval or blocks it even when it is in `allowedTools`.",
+        "Tool search is on by default and defers SDK MCP tool schemas (names listed, schema loaded on demand) to save context; `alwaysLoad: true` keeps one in the prompt."
+      ],
+      "example": {
+        "title": "Custom tool with explicit error result (TypeScript)",
+        "language": "typescript",
+        "code": "import { tool, createSdkMcpServer, query } from \"@anthropic-ai/claude-agent-sdk\";\nimport { z } from \"zod\";\n\nconst fetchData = tool(\n  \"fetch_data\",\n  \"Fetch JSON from an API endpoint. Returns the response body as text.\",\n  { endpoint: z.string().url().describe(\"API endpoint URL\") },\n  async (args) => {\n    try {\n      const res = await fetch(args.endpoint);\n      if (!res.ok) {\n        return { content: [{ type: \"text\", text: `API error: ${res.status}` }], isError: true };\n      }\n      return { content: [{ type: \"text\", text: JSON.stringify(await res.json()) }] };\n    } catch (e) {\n      return { content: [{ type: \"text\", text: `Failed to fetch: ${e}` }], isError: true };\n    }\n  },\n  { annotations: { readOnlyHint: true } }\n);\n\nconst server = createSdkMcpServer({ name: \"api\", version: \"1.0.0\", tools: [fetchData] });\n\nfor await (const m of query({\n  prompt: \"Get https://example.com/api/status\",\n  options: { mcpServers: { api: server }, allowedTools: [\"mcp__api__fetch_data\"] },\n})) { /* handle messages */ }\n"
+      },
+      "examTips": [
+        "The tool is invisible to approval flow? Check the name: `mcp__<server>__<tool>` exactly, not just the bare tool name.",
+        "`readOnlyHint` is the lever for parallel execution of custom tools; it does not make a tool actually read-only.",
+        "Custom SDK tools use the MCP result shape (`content` array, `isError`), unlike the Messages API `tool_result` (`content`, `is_error`)."
+      ],
+      "source": "https://code.claude.com/docs/en/agent-sdk/custom-tools"
+    },
+    {
+      "heading": "System prompts and project context",
+      "notes": [
+        "Three starting points in the Agent SDK: no `systemPrompt` (minimal default: tool calling, omits Claude Code's safety instructions), the `claude_code` preset, or a custom string.",
+        "Use the preset (optionally with `append`) for coding tools where a human steers; `append` adds instructions without removing anything, the lowest-risk customization. Use a custom prompt for a different identity, surface, or permission model; you then own tool guidance and safety instructions.",
+        "CLAUDE.md is loaded through `settingSources` (`project`, `user`) and is injected into the conversation as context, not the system prompt, so it works with any system prompt. Default `query()` options enable both sources; passing an empty `settingSources` disables it.",
+        "Output styles are saved markdown instructions (`.claude/output-styles/`); they omit Claude Code's coding instructions unless `keep-coding-instructions: true`.",
+        "A session records its system prompt on the first request and reuses it on resume; a different `append` on resume takes effect only after compaction or in a new session. To change instructions mid-session send them in a user message or via hook `additionalContext`.",
+        "Prompt caching: `excludeDynamicSections: true` on the preset moves per-user context into the first user message so identical configs share a cache entry. Custom prompts in TypeScript can use `SYSTEM_PROMPT_DYNAMIC_BOUNDARY`.",
+        "In Managed Agents the `system` field on the agent holds the system prompt; user messages should describe the work to be done."
+      ],
+      "example": {
+        "title": "Preset plus append plus CLAUDE.md",
+        "language": "python",
+        "code": "options = ClaudeAgentOptions(\n    system_prompt={\n        \"type\": \"preset\",\n        \"preset\": \"claude_code\",\n        \"append\": \"Always include type hints and docstrings in Python code.\",\n    },\n    setting_sources=[\"project\"],   # loads CLAUDE.md\n)\n"
+      },
+      "examTips": [
+        "'Agent behaves differently than the CLI': the SDK default prompt is minimal; set the `claude_code` preset.",
+        "'Keep built-in safety and tool guidance but add our rules': preset + `append`, never a custom string.",
+        "'Rules must persist across compaction': put them in CLAUDE.md, not the first prompt."
+      ],
+      "source": "https://code.claude.com/docs/en/agent-sdk/modifying-system-prompts"
+    },
+    {
+      "heading": "Subagents",
+      "notes": [
+        "Subagents are separate agent instances your main agent spawns through the `Agent` tool (shows as `Task` in the init tools list and in older versions). Benefits: context isolation, parallelism, specialized instructions, and tool restrictions.",
+        "Define them with the `agents` option (programmatic, recommended), as `.claude/agents/*.md` files, or rely on the built-in `general-purpose` subagent. Programmatic definitions override filesystem ones of the same name.",
+        "`AgentDefinition`: `description` (required, tells Claude WHEN to use it), `prompt` (required, its system prompt), and optional `tools` (omit = inherit all), `disallowedTools`, `model` (`sonnet`, `opus`, `haiku`, `inherit`, or full ID), `skills`, `mcpServers`, `maxTurns`, `effort`, `background`, `permissionMode`.",
+        "Include `\"Agent\"` in `allowedTools` so the parent can invoke subagents without a prompt.",
+        "A subagent starts with a FRESH context: it gets its own prompt plus the Agent tool's prompt string, project CLAUDE.md and tools, but NOT the parent's conversation history or tool results. Pass file paths, errors and decisions in the prompt string. Only its final message returns to the parent.",
+        "Invocation: automatic (matched on `description`) or explicit by naming it in the prompt. Messages from inside a subagent carry `parent_tool_use_id`. Resume a subagent by resuming the SAME session and referencing its `agentId`; Explore and Plan built-ins are one-shot.",
+        "Limits: depth `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` (default 3), concurrency `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` (default 20), and spend via `maxBudgetUsd` (subagent spend counts; at the cap spawning fails with 'Budget limit reached'). Set the env limits through the `env` option (TypeScript replaces the environment, so spread `process.env`).",
+        "Permission inheritance: if the parent is in `plan`, `acceptEdits`, `auto` or `bypassPermissions`, subagents inherit it; `bypassPermissions` grants subagents full access, so use with care.",
+        "Managed Agents has its own `multiagent` config (subagents, dynamic workflows, advisor model) with a single shared session budget."
+      ],
+      "example": {
+        "title": "Read-only code-reviewer subagent",
+        "language": "python",
+        "code": "options = ClaudeAgentOptions(\n    allowed_tools=[\"Read\", \"Grep\", \"Glob\", \"Agent\"],\n    agents={\n        \"code-reviewer\": AgentDefinition(\n            description=\"Expert code review specialist. Use for quality and security reviews.\",\n            prompt=\"You are a code review specialist. Be thorough but concise.\",\n            tools=[\"Read\", \"Grep\", \"Glob\"],   # no Edit/Write/Bash\n            model=\"sonnet\",\n        )\n    },\n)\n"
+      },
+      "examTips": [
+        "Subagent not being used? Sharpen its `description`, or name it explicitly in the prompt. Also confirm `Agent` is available.",
+        "Why use a subagent for a big search? Its intermediate tool calls stay out of the main context; only the summary returns.",
+        "Subagents do not see the parent's history. If one lacks needed facts, the fix is a richer Agent-tool prompt.",
+        "A listed `tools` array is a hard allowlist: omitted tools do not exist for that subagent (no prompt, no error)."
+      ],
+      "source": "https://code.claude.com/docs/en/agent-sdk/subagents"
+    },
+    {
+      "heading": "Permissions in the Agent SDK",
+      "notes": [
+        "Evaluation order for each tool request: (1) hooks, (2) deny rules, (3) ask rules, (4) permission mode, (5) allow rules, (6) `canUseTool` callback. Deny rules and hook denies win even in `bypassPermissions`.",
+        "Modes: `default` (anything needing approval goes to `canUseTool`; no callback means deny), `acceptEdits` (auto-approves file edits and common filesystem commands inside working directories), `plan` (explore and plan; edits go to your callback), `dontAsk` (never prompts: unapproved calls are denied; good for headless), `auto` (model classifier reviews actions), `bypassPermissions` (runs without asking; TypeScript also needs `allowDangerouslySkipPermissions: true`; cannot run as root on Unix; isolated environments only).",
+        "`allowed_tools` = auto-approve list. It does NOT restrict `bypassPermissions`: with `allowed_tools=[\"Read\"]` and bypass, `Bash`, `Write` and `Edit` are still approved. To block under bypass use `disallowed_tools` (or a hook).",
+        "`disallowed_tools=[\"Bash\"]` removes the tool from Claude's context; `disallowed_tools=[\"Bash(rm *)\"]` keeps Bash but denies matching calls in every mode. Path rules for writes are written as `Edit(path)` (not `Write(path)`).",
+        "Auto-approved calls never reach `canUseTool`. To check approved calls, use a `PreToolUse` hook, which still runs for them.",
+        "Change mode mid-session with `set_permission_mode()` / `setPermissionMode()` (streaming sessions).",
+        "Locked-down headless pattern: `allowedTools: [\"Read\",\"Glob\",\"Grep\"]` plus `permissionMode: \"dontAsk\"`.",
+        "MCP tools need explicit permission: prefer `allowedTools` with `mcp__server__*` over broad modes; `acceptEdits` does NOT approve MCP tools.",
+        "**Managed Agents** uses permission policies instead: `always_allow`, `always_ask`, `auto`. Agent toolset defaults to `always_allow`; MCP toolsets default to `always_ask`. Custom tools are NOT governed by policies (your app decides)."
+      ],
+      "example": {
+        "title": "canUseTool approval callback with default mode",
+        "language": "typescript",
+        "code": "for await (const m of query({\n  prompt: \"Refactor the auth module\",\n  options: {\n    permissionMode: \"default\",\n    allowedTools: [\"Read\", \"Glob\", \"Grep\"],        // auto-approved\n    disallowedTools: [\"Bash(rm *)\"],               // always denied\n    canUseTool: async (toolName, input) => {       // everything else lands here\n      const ok = await askHuman(toolName, input);\n      return ok ? { behavior: \"allow\", updatedInput: input }\n                : { behavior: \"deny\", message: \"Rejected by reviewer\" };\n    },\n  },\n})) { /* ... */ }\n"
+      },
+      "examTips": [
+        "'Agent in CI container, nobody to approve': `dontAsk` with explicit allow rules, or `bypassPermissions` only inside an isolated sandbox.",
+        "Question trap: `allowed_tools` + `bypassPermissions` does not limit tools. Pick `disallowed_tools` or a PreToolUse hook.",
+        "`canUseTool` never fires for a tool in `allowedTools`. If your callback is not running, check allow rules and mode.",
+        "`plan` mode keeps even subagents in plan mode; a subagent's `acceptEdits` does not override it."
+      ],
+      "source": "https://code.claude.com/docs/en/agent-sdk/permissions"
+    },
+    {
+      "heading": "SDK hooks",
+      "notes": [
+        "Hooks are callbacks (in your app process, not in the context window) that fire at lifecycle events. Register with `options.hooks`: event name to a list of matchers (`HookMatcher(matcher=..., hooks=[...])`). Event names are case-sensitive.",
+        "Key events: `PreToolUse` (can block or modify), `PostToolUse`, `PostToolUseFailure`, `UserPromptSubmit`, `Stop`, `SubagentStart`/`SubagentStop`, `PreCompact`, `PermissionRequest`, `Notification`. TypeScript-only events include `SessionStart`, `SessionEnd`, `PostToolBatch`, `PostCompact` and many more; in Python, `SessionStart`/`SessionEnd` are only shell-command hooks in settings.",
+        "Matchers match the TOOL NAME (regex or pipe list like `Write|Edit`, or `^mcp__` for all MCP tools), not file paths. To filter by path, inspect `tool_input.file_path` inside the callback.",
+        "Callback signature: `(input_data, tool_use_id, context)`. Return `{}` to allow unchanged. To block a tool return `hookSpecificOutput` with `hookEventName`, `permissionDecision` (`allow`/`deny`/`ask`/`defer`) and `permissionDecisionReason` (what the MODEL sees); `systemMessage` is shown to the USER; `additionalContext` is how you pass text to the model.",
+        "`updatedInput` (inside `hookSpecificOutput`) rewrites tool input; pair it with `permissionDecision: 'allow'`. `updatedToolOutput` (PostToolUse) replaces the output before Claude sees it.",
+        "Multiple matching hooks run in parallel; precedence is deny > defer > ask > allow. A hook `allow` does not skip deny or ask rules.",
+        "Async side effects: return `{async: true}` (Python key `async_`) to continue immediately; async hooks cannot block or modify.",
+        "Failure behavior: by default a throwing callback lets the action proceed (a `hook_callback_failed` informational message is emitted). Set `onFailure: 'block'` (Python `on_failure='block'`) on the matcher to fail closed. Timeouts: a `PreToolUse` timeout blocks the call; defaults are 600 s for most events.",
+        "Hooks may not fire when the run ends at `max_turns`. A `Write|Edit` hook does not stop `Bash` from writing the same file."
+      ],
+      "example": {
+        "title": "PreToolUse hook blocking .env writes",
+        "language": "python",
+        "code": "async def protect_env_files(input_data, tool_use_id, context):\n    file_path = input_data[\"tool_input\"].get(\"file_path\", \"\")\n    if file_path.split(\"/\")[-1].lower() == \".env\":\n        return {\n            \"hookSpecificOutput\": {\n                \"hookEventName\": input_data[\"hook_event_name\"],\n                \"permissionDecision\": \"deny\",\n                \"permissionDecisionReason\": \"Cannot modify .env files\",\n            }\n        }\n    return {}\n\noptions = ClaudeAgentOptions(\n    hooks={\"PreToolUse\": [HookMatcher(matcher=\"Write|Edit\", hooks=[protect_env_files])]}\n)\n"
+      },
+      "examTips": [
+        "Deterministic enforcement (block, audit, rewrite) = hooks. Soft guidance = system prompt. The model can ignore prompts, not hooks.",
+        "`systemMessage` goes to the user, `permissionDecisionReason` and `additionalContext` go to the model.",
+        "`updatedInput` placed at the top level (outside `hookSpecificOutput`) is ignored.",
+        "Hooks are the way to inspect calls that `allowedTools`, `acceptEdits` or `bypassPermissions` auto-approve."
+      ],
+      "source": "https://code.claude.com/docs/en/agent-sdk/hooks"
+    },
+    {
+      "heading": "Sessions and MCP in agents",
+      "notes": [
+        "A session is the conversation history (prompt, tool calls, results, responses) the SDK writes to disk (`~/.claude/projects/<encoded-cwd>/*.jsonl`). It persists the conversation, NOT the filesystem; use file checkpointing to revert file changes.",
+        "**Continue** (`continue: true` / `continue_conversation=True`) resumes the most recent session in the cwd, no ID needed. **Resume** (`resume=session_id`) targets a specific session (required with multiple users or sessions). **Fork** (`resume=id` + `fork_session=True` / `forkSession: true`) copies history into a NEW session; the original is unchanged (files edited by a fork are still real).",
+        "Capture `session_id` from `ResultMessage` (present on every result, even errors) or the init message. Python `ClaudeSDKClient` tracks the session across `query()` calls automatically. Recover from `error_max_turns` or `error_max_budget_usd` by resuming with a higher limit.",
+        "Sessions are local to the machine. For other hosts, use a `session_store` / `sessionStore` adapter, move the `.jsonl` file, or pass results into a fresh session. `persistSession: false` (TypeScript) keeps nothing on disk.",
+        "**MCP**: configure `mcpServers` in code or `.mcp.json` (needs `project` setting source). Transports: stdio (command + args + env), HTTP (`type: http`, url, headers), SSE, and in-process SDK servers. Tools are named `mcp__<server>__<tool>` and need `allowedTools` permission (wildcards allowed).",
+        "Check the `init` message's `mcp_servers` statuses: `connected`, `pending`, `failed`, `needs-auth`, `disabled`. `pending` is not a failure by itself (still connecting or cached tool list). A failed server does NOT stop the run: Claude may silently fall back to other tools, so verify status. Poll `mcpServerStatus()` / `get_mcp_status()` later; `reconnectMcpServer()` retries.",
+        "OAuth: the SDK runs no interactive browser flow. Do OAuth in your app and pass the token in `headers`, or sign in via an interactive Claude Code session first.",
+        "Connection wait is `MCP_TIMEOUT` (30 s default); large MCP tool results over 25,000 tokens are saved to a file (`MAX_MCP_OUTPUT_TOKENS`). MCP tool search defers schemas by default to save context.",
+        "In **Managed Agents**, MCP servers are declared on the agent (`mcp_servers` with `type: url`) and enabled with an `mcp_toolset` entry; MCP toolsets default to `always_ask`."
+      ],
+      "example": {
+        "title": "Resume vs fork, plus an HTTP MCP server",
+        "language": "python",
+        "code": "# Resume the exact session\noptions = ClaudeAgentOptions(resume=session_id,\n                             allowed_tools=[\"Read\", \"Edit\", \"Glob\", \"Grep\"])\n\n# Fork: branch into a new session, original stays untouched\nfork = ClaudeAgentOptions(resume=session_id, fork_session=True, max_turns=5)\n\n# Remote MCP server with auth header\nmcp = ClaudeAgentOptions(\n    mcp_servers={\"github\": {\n        \"type\": \"http\",\n        \"url\": \"https://api.githubcopilot.com/mcp/\",\n        \"headers\": {\"Authorization\": f\"Bearer {os.environ['GITHUB_TOKEN']}\"},\n    }},\n    allowed_tools=[\"mcp__github__list_issues\"],\n)\n"
+      },
+      "examTips": [
+        "Fork vs resume: want to keep the original thread unchanged while exploring an alternative = fork. Want to add to the same thread = resume.",
+        "Session does not save file state. 'Undo what the agent did to files' needs file checkpointing, not sessions.",
+        "MCP tools silently unused: usually missing `allowedTools` entry, or the server shows `failed` / `needs-auth` in init.",
+        "Multi-user app: use `resume` with a stored ID per user; `continue` only follows the most recent session in the directory."
+      ],
+      "source": "https://code.claude.com/docs/en/agent-sdk/sessions"
+    },
+    {
+      "heading": "Managed Agents: hosted harness",
+      "notes": [
+        "Four concepts: **Agent** (model, system prompt, tools, MCP servers, skills; reusable and versioned), **Environment** (where sessions run: Anthropic-managed cloud sandbox with networking config, or a self-hosted sandbox), **Session** (a running agent instance in an environment), **Events** (messages exchanged: user turns, tool results, status).",
+        "Flow: create agent (save `agent.id`), create environment, create session (`agent`, `environment_id`, optional `budget`), open the event stream, send `user.message`, process events until `session.status_idle`. Event history is persisted server-side and can be listed; you can send more events to steer or interrupt (`user.interrupt`).",
+        "Beta header `managed-agents-2026-04-01` on all endpoints (SDK adds it). Python: `client.beta.agents.create`, `client.beta.environments.create`, `client.beta.sessions.create`, `client.beta.sessions.events.stream/send`.",
+        "Built-in tools via `{\"type\": \"agent_toolset_20260401\"}`: `bash`, `read`, `write`, `edit`, `glob`, `grep`, `web_fetch`, `web_search`, all enabled by default. Disable per tool with `configs: [{name, enabled: false}]`, or start from nothing with `default_config: {enabled: false}` then enable what you need. Give agents only the tools they need.",
+        "Custom tools: declare `{\"type\": \"custom\", name, description, input_schema}` on the agent (names may not start with `mcp__` or `ant__`). Claude does not run them: the session emits `agent.custom_tool_use`, goes idle with `stop_reason.type: requires_action`, and you reply with `user.custom_tool_result` (using `custom_tool_use_id`).",
+        "Permission policies (server-executed tools only): `always_allow`, `always_ask`, `auto`. With `always_ask` the session emits `agent.tool_use`, pauses with `session.status_idle` / `requires_action`, and you answer with `user.tool_confirmation` (`tool_use_id`, `result: allow|deny`, optional `deny_message`). Under `auto` the server runs safe calls, denies high-risk ones (error tool result; you cannot override) and asks for the rest.",
+        "Idle `stop_reason.type` values: `end_turn`, `requires_action`, `budget_reached`.",
+        "Agents are versioned: each configuration change makes a new `version`; pass `version` on update for optimistic concurrency (409 on mismatch); omitted fields are preserved, array fields are fully replaced; archive makes an agent read-only (existing sessions keep running). Per-session overrides exist for model, system, tools, mcp_servers, skills.",
+        "Managed Agents is stateful: transcripts persist until you delete them, so it is NOT eligible for Zero Data Retention or HIPAA BAA coverage."
+      ],
+      "example": {
+        "title": "Create an agent, environment and session, then stream (Python)",
+        "language": "python",
+        "code": "from anthropic import Anthropic\nclient = Anthropic()\n\nagent = client.beta.agents.create(\n    name=\"Coding Assistant\",\n    model=\"claude-opus-5-5\",\n    system=\"You are a helpful coding assistant.\",\n    tools=[{\"type\": \"agent_toolset_20260401\",\n            \"configs\": [{\"name\": \"web_search\", \"enabled\": False}]}],\n)\nenv = client.beta.environments.create(\n    name=\"quickstart-env\",\n    config={\"type\": \"cloud\", \"networking\": {\"type\": \"limited\", \"allow_package_managers\": True}},\n)\nsession = client.beta.sessions.create(agent=agent.id, environment_id=env.id)\n\nwith client.beta.sessions.events.stream(session.id) as stream:\n    client.beta.sessions.events.send(session.id, events=[\n        {\"type\": \"user.message\", \"content\": [{\"type\": \"text\", \"text\": \"Write fib.py and run it\"}]}])\n    for event in stream:\n        if event.type == \"agent.message\":\n            ...\n        elif event.type == \"session.status_idle\":\n            break\n"
+      },
+      "examTips": [
+        "Choose Managed Agents when the scenario says Anthropic should run the loop, sandbox and tool execution, with long-running or async tasks and minimal infrastructure.",
+        "Custom tool in Managed Agents: your code executes it and answers with `user.custom_tool_result`. Permission policies do not apply to it.",
+        "`always_ask` confirmation event is `user.tool_confirmation`; custom tool answer is `user.custom_tool_result`. Do not mix them.",
+        "Sending a confirmation for a call the server already denied under `auto` returns a 400."
+      ],
+      "source": "https://platform.claude.com/docs/en/managed-agents/quickstart"
+    },
+    {
+      "heading": "Limits, budgets and cost control",
+      "notes": [
+        "**Agent SDK**: `max_turns` / `maxTurns` caps turns (count each tool-calling turn plus one for the final text-only response; hitting it yields `error_max_turns` with no final response). `max_budget_usd` / `maxBudgetUsd` caps estimated spend (yields `error_max_budget_usd`). Neither has a default limit. Subagent spend counts toward the budget.",
+        "Budget headroom: spend is compared after each model response, so the response that crosses the cap still completes; spend can exceed the cap by up to one response plus running subagents. Leave margin.",
+        "`effort` (`low`, `medium`, `high`, `xhigh`, `max`) trades reasoning depth for tokens and latency per response; separate from extended thinking. Set it per query or per subagent.",
+        "Keep context lean: subagents for subtasks, restrict tools, rely on MCP tool search, lower effort for routine work. Prompt caching covers stable prefixes automatically.",
+        "**Messages API loop**: you implement the cap yourself (iteration counter, token tracking). Tool runner uses `max_iterations`. Messages API 'task budgets' are advisory, token-denominated hints the model uses to self-regulate; they are not hard caps.",
+        "**Managed Agents** session `budget`: `{\"type\": \"limit\", \"max_list_cost\": {\"amount\": \"125\", \"currency\": \"USD\"}}` where amount is a string of whole US cents (\"125\" = $1.25). It is a hard cap at list prices (tokens, $10 per 1,000 web searches, $0.08 per session hour), set only at session creation, enforced between model requests, so the final cost can pass the cap by up to one request per thread.",
+        "At the Managed Agents cap the session goes IDLE (not terminated) with `stop_reason: budget_reached`; only settle events (`user.tool_confirmation`, `user.custom_tool_result`, `user.tool_result`, `user.interrupt`) are accepted, `user.message` returns 400. Resume by updating the budget (must exceed consumed cost) or removing it with `null` (removal is one-way).",
+        "Track cost: Agent SDK `total_cost_usd` and `model_usage` on the result; Managed Agents `usage.list_cost` and `session.usage` events."
+      ],
+      "example": {
+        "title": "Capping subagent fan-out and spend (TypeScript)",
+        "language": "typescript",
+        "code": "for await (const message of query({\n  prompt: \"Audit every service for unhandled promise rejections\",\n  options: {\n    allowedTools: [\"Read\", \"Grep\", \"Glob\", \"Agent\"],\n    env: {\n      ...process.env,                                  // TS replaces the env\n      CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: \"1\",       // no nested subagents\n      CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: \"5\",\n    },\n    maxTurns: 40,\n    maxBudgetUsd: 5,\n  },\n})) {\n  if (message.type === \"result\") console.log(message.subtype, message.total_cost_usd);\n}\n"
+      },
+      "examTips": [
+        "Runaway cost on an open-ended prompt: set `max_turns` and `max_budget_usd`; consider lowering `effort` and restricting subagents.",
+        "Hit `error_max_turns`: the session is not lost; resume the `session_id` with a higher limit.",
+        "Managed Agents budget amount is a STRING in cents. \"25.00\" is rejected; so is adding a budget after creation.",
+        "A budgeted Managed Agents session that reaches the cap is idle, not failed; history and sandbox are preserved."
+      ],
+      "source": "https://platform.claude.com/docs/en/managed-agents/budgets"
+    },
+    {
+      "heading": "Error handling in agents",
+      "notes": [
+        "Three layers: (1) tool errors, (2) API/HTTP errors, (3) agent-run errors (limits, refusals, crashes).",
+        "**Tool errors**: return the failure to Claude as a `tool_result` with `is_error: true` (Messages API) or `isError: true` (SDK custom tools). Write instructive messages ('Rate limit exceeded. Retry after 60 seconds.') so Claude can adapt. Claude typically retries invalid calls 2-3 times with corrections. Tool runner and SDK MCP servers convert exceptions to error results automatically; the loop continues.",
+        "Invalid tool inputs: improve the description first; `strict: true` guarantees schema-valid inputs. Server tool errors (web search `too_many_requests`, `max_uses_exceeded`, ...) are handled by Claude; no `is_error` handling needed.",
+        "**API errors**: 400 `invalid_request_error`, 401 `authentication_error`, 402 `billing_error`, 403 `permission_error`, 404 `not_found_error`, 409 `conflict_error`, 413 `request_too_large`, 429 `rate_limit_error`, 500 `api_error`, 504 `timeout_error`, 529 `overloaded_error`. Every response has a `request-id` (log it for support).",
+        "The official SDK auto-retries transient failures (connection errors, 429, 5xx) with exponential backoff, 2 times by default, honoring `retry-after`; configure with `max_retries`. Catch typed exceptions (e.g. `anthropic.RateLimitError`) most-specific first. 400-class errors are not fixed by retrying. A spend-cap 429 has no `retry-after` and keeps failing.",
+        "Long requests: use streaming (or Batches) for large `max_tokens` or runs over ~10 minutes. Errors can arrive mid-stream after an HTTP 200 as error events.",
+        "**Agent-run errors**: check `ResultMessage.subtype` (`error_max_turns`, `error_max_budget_usd`, `error_during_execution`) and `stop_reason` (`refusal`, `max_tokens`). A single-shot `query()` raises after yielding an error result; connection or process failures yield NO result message. After a crash the result is `error_during_execution` with zeroed cost fields.",
+        "Also handle: MCP servers that failed to connect (check init status), hook failures (`onFailure: 'block'` to fail closed), and an API error that ends a subagent early (not delivered as its result).",
+        "Managed Agents: watch for `session.error` events and idle `stop_reason` values; reconnecting to a stream should not lose events (events are persisted and listable)."
+      ],
+      "example": {
+        "title": "Tool error with guidance, and typed API error handling",
+        "language": "python",
+        "code": "import anthropic\n\n# 1. Tool failure -> instructive error result\nresult = {\"type\": \"tool_result\", \"tool_use_id\": block.id, \"is_error\": True,\n          \"content\": \"Rate limit exceeded on weather API. Retry after 60 seconds or use cached data.\"}\n\n# 2. API failure -> typed exceptions; SDK already retried transient ones twice\nclient = anthropic.Anthropic(max_retries=3)\ntry:\n    response = client.messages.create(model=\"claude-sonnet-5-5\", max_tokens=1024, messages=messages)\nexcept anthropic.RateLimitError as e:      # 429\n    log(e.response.headers.get(\"request-id\")); backoff()\nexcept anthropic.APIStatusError as e:      # other 4xx/5xx\n    log(e.status_code, e.response.headers.get(\"request-id\")); raise\n"
+      },
+      "examTips": [
+        "Distinguish: HTTP error (no stop_reason, exception) vs `refusal` (HTTP 200 with stop_reason) vs tool failure (your `is_error` result) vs run-limit result subtype.",
+        "A tool exception does not crash the Agent SDK loop; Claude sees the message and decides. Compose the message yourself with `isError` for better recovery.",
+        "Retrying a 400 is pointless; retrying 429/5xx/529 with backoff is correct, and the SDK already does it twice by default.",
+        "If the first message after a crash has `error_during_execution` and zero cost, totals must be recovered separately; do not assume cost fields are valid."
+      ],
+      "source": "https://platform.claude.com/docs/en/api/errors"
+    }
+  ],
+  "keyTakeaways": [
+    "Pick the construction approach by control vs convenience: Messages API loop (full control), tool runner (SDK-driven loop), Agent SDK (Claude Code's loop and tools as a library), Managed Agents (Anthropic-hosted harness and sandbox).",
+    "Messages API loop: while `stop_reason == tool_use`, run tools, append assistant message, then one user message with `tool_result` blocks FIRST; match `tool_use_id`; answer every block.",
+    "Use `is_error: true` (API) or `isError: true` (SDK tools) with an instructive message; exceptions in the tool runner or SDK servers become error results and the loop continues.",
+    "`tool_choice` is auto, any, tool or none; `disable_parallel_tool_use` lives inside it; forced tool use is rejected (400) on Opus 5.5, Sonnet 5.5, Fable 5.1 and Mythos 5.1.",
+    "Agent SDK `ResultMessage.subtype`: success, error_max_turns, error_max_budget_usd, error_during_execution; `result` only exists on success; single-shot `query()` raises after yielding an error result.",
+    "Bound agents with `max_turns`, `max_budget_usd` (can overshoot by one response), `effort`, and subagent depth/concurrency env limits; tool runner uses `max_iterations`.",
+    "Custom SDK tools are in-process MCP servers named `mcp__server__tool`; list names (or `mcp__server__*`) in `allowedTools`; `readOnlyHint` enables parallel execution.",
+    "Permission evaluation order: hooks, deny rules, ask rules, mode, allow rules, `canUseTool`. `allowed_tools` does not constrain `bypassPermissions`; use `disallowed_tools` or hooks.",
+    "Hooks (PreToolUse, PostToolUse, Stop, SubagentStop...) give deterministic control: `permissionDecision` deny, `updatedInput`, `additionalContext`; matchers match tool names; `onFailure: 'block'` fails closed.",
+    "Subagents start with fresh context (only the Agent tool prompt crosses over), return only a final message, are defined by `description` + `prompt` (+ `tools`, `model`), and need `Agent` in `allowedTools`.",
+    "Sessions: continue = most recent, resume = by ID, fork = new branch from a copy; sessions save conversation not files; MCP init status can be failed or needs-auth without stopping the run.",
+    "Managed Agents: agent + environment + session + events; custom tools answered with `user.custom_tool_result`, confirmations with `user.tool_confirmation`; session budget is a hard cap in string cents and idles at `budget_reached`."
+  ],
+  "glossary": [
+    {
+      "term": "Agent loop",
+      "definition": "The cycle of Claude requesting tool calls, tools executing, and results returning until Claude responds without a tool call."
+    },
+    {
+      "term": "stop_reason",
+      "definition": "Field on a Messages API response saying why generation ended, e.g. end_turn, tool_use, max_tokens, pause_turn, refusal."
+    },
+    {
+      "term": "tool_use / tool_result",
+      "definition": "Content blocks: Claude's request to call a tool (id, name, input) and your reply (tool_use_id, content, optional is_error)."
+    },
+    {
+      "term": "is_error",
+      "definition": "Flag on a tool_result (isError on SDK MCP tool results) marking a failed tool call so Claude can react."
+    },
+    {
+      "term": "tool_choice",
+      "definition": "Request setting controlling tool selection: auto, any, tool (named), none; also holds disable_parallel_tool_use."
+    },
+    {
+      "term": "Tool runner",
+      "definition": "Beta SDK helper (client.beta.messages.tool_runner) that runs the tool loop for you, bounded by max_iterations."
+    },
+    {
+      "term": "Claude Agent SDK",
+      "definition": "Python and TypeScript library embedding Claude Code's agent loop, built-in tools, permissions, hooks, sessions and subagents."
+    },
+    {
+      "term": "query()",
+      "definition": "Agent SDK entry point returning a stream of messages for one agent run, ending with a ResultMessage."
+    },
+    {
+      "term": "ResultMessage",
+      "definition": "Final message of an SDK run with subtype, result (success only), total_cost_usd, usage, num_turns and session_id."
+    },
+    {
+      "term": "max_turns / max_budget_usd",
+      "definition": "Agent SDK options capping tool-calling turns and estimated spend; hitting them yields error_max_turns or error_max_budget_usd."
+    },
+    {
+      "term": "allowedTools / disallowedTools",
+      "definition": "Allow rules auto-approve tools; deny rules block them (bare name also removes the tool from context)."
+    },
+    {
+      "term": "permissionMode",
+      "definition": "Global approval behavior: default, acceptEdits, plan, dontAsk, auto, bypassPermissions."
+    },
+    {
+      "term": "canUseTool",
+      "definition": "Callback invoked when no earlier permission step resolved a tool call; returns allow or deny."
+    },
+    {
+      "term": "Hook",
+      "definition": "Callback fired at lifecycle events (PreToolUse, PostToolUse, Stop...) that can log, block, or modify behavior."
+    },
+    {
+      "term": "Subagent",
+      "definition": "Separate agent instance spawned via the Agent tool with its own context, prompt and tool set; returns only its final message."
+    },
+    {
+      "term": "AgentDefinition",
+      "definition": "Config for a subagent: description, prompt, tools, model, maxTurns, effort, etc."
+    },
+    {
+      "term": "Session (Agent SDK)",
+      "definition": "Persisted conversation history that can be continued, resumed by ID, or forked."
+    },
+    {
+      "term": "In-process SDK MCP server",
+      "definition": "Server created with create_sdk_mcp_server that hosts custom tools inside your application process."
+    },
+    {
+      "term": "MCP",
+      "definition": "Model Context Protocol, an open standard for connecting agents to external tools and data over stdio, HTTP or SSE."
+    },
+    {
+      "term": "Managed Agents",
+      "definition": "Beta Anthropic-hosted agent harness with agents, environments, sessions and events running in a managed sandbox."
+    },
+    {
+      "term": "agent_toolset_20260401",
+      "definition": "Managed Agents tool type enabling built-in bash, file, web_search and web_fetch tools."
+    },
+    {
+      "term": "Permission policy (Managed Agents)",
+      "definition": "always_allow, always_ask or auto setting that controls whether server-executed tools run without confirmation."
+    },
+    {
+      "term": "Session budget (Managed Agents)",
+      "definition": "Hard list-price spend cap in string cents set at session creation; session idles with budget_reached."
+    },
+    {
+      "term": "pause_turn",
+      "definition": "Stop reason when a server-tool loop hits its iteration limit; resend the assistant content to continue."
+    }
+  ],
+  "quiz": [
+    {
+      "q": "A team wants Claude Code's file-editing and shell tools, permission model and session resume embedded in their own Python service, running in their own infrastructure. Which approach fits best?",
+      "options": [
+        "Messages API with a hand-written tool loop",
+        "Claude Agent SDK",
+        "Managed Agents with a cloud environment",
+        "Tool runner with custom Bash and Edit tools"
+      ],
+      "answer": 1,
+      "explanation": "The Agent SDK embeds Claude Code's agent loop and built-in tools, permissions and sessions in a process you operate. Messages API and tool runner would require building those tools yourself; Managed Agents runs the harness in Anthropic's sandbox rather than in your service.",
+      "source": "https://code.claude.com/docs/en/agent-sdk/overview"
+    },
+    {
+      "q": "Your manual Messages API loop returns a 400 saying tool_use ids were found without tool_result blocks immediately after. The code appends a user message with a text hint followed by the tool_result blocks. What is the fix?",
+      "options": [
+        "Switch tool_choice to any",
+        "Add a system message between the assistant and user messages",
+        "Place tool_result blocks first in the user content array and any text after them",
+        "Send each tool_result in a separate user message"
+      ],
+      "answer": 2,
+      "explanation": "Tool results must immediately follow the tool_use message and tool_result blocks must come first in the content array; text goes after. Separate messages or extra messages in between break the rule, and tool_choice is unrelated.",
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls"
+    },
+    {
+      "q": "A custom tool in your loop calls a weather API that returns HTTP 500. You want Claude to tell the user and possibly retry later. What should the tool_result contain?",
+      "options": [
+        "A system prompt update describing the failure",
+        "A new assistant message with the error text",
+        "Nothing; omit the tool_result so Claude retries",
+        "An is_error: true result with a message such as 'weather service unavailable (HTTP 500), retry later'"
+      ],
+      "answer": 3,
+      "explanation": "Return the failure as a tool_result with is_error true and an instructive message; Claude incorporates it. Omitting the result causes a 400, and errors do not belong in the system prompt or fabricated assistant messages.",
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls"
+    },
+    {
+      "q": "An Agent SDK run ends with a ResultMessage whose subtype is error_max_turns. Your code prints message.result and crashes. What is correct about this situation?",
+      "options": [
+        "result is always present; the crash is an SDK bug",
+        "error_max_turns means the session is deleted and cannot be resumed",
+        "You must restart with the same max_turns, otherwise the SDK will refuse",
+        "result is only present on the success subtype, so check subtype first and resume the session with a higher max_turns if needed"
+      ],
+      "answer": 3,
+      "explanation": "The result field exists only on success. Error results still carry session_id, num_turns and cost, so you can resume the session with a higher limit. The session is not lost.",
+      "source": "https://code.claude.com/docs/en/agent-sdk/agent-loop"
+    },
+    {
+      "q": "You run an Agent SDK agent with permission_mode='bypassPermissions' and allowed_tools=['Read'], expecting it to be read-only. What actually happens?",
+      "options": [
+        "Only Read can run; other tools are blocked",
+        "Bash, Write and Edit calls are also approved because allowed_tools does not constrain bypassPermissions",
+        "Every call goes to canUseTool",
+        "The SDK refuses to start"
+      ],
+      "answer": 1,
+      "explanation": "allowed_tools only pre-approves listed tools; in bypassPermissions mode unlisted tools are approved too. To block tools under bypass use disallowed_tools (deny rules still apply) or a PreToolUse hook.",
+      "source": "https://code.claude.com/docs/en/agent-sdk/permissions"
+    },
+    {
+      "q": "You need an audit log of every Bash command the agent runs, including ones auto-approved by allowedTools, and the ability to veto dangerous ones. Which mechanism is best?",
+      "options": [
+        "Setting permissionMode to plan",
+        "A canUseTool callback",
+        "A PreToolUse hook matching Bash",
+        "A line in the system prompt asking Claude to avoid dangerous commands"
+      ],
+      "answer": 2,
+      "explanation": "PreToolUse hooks run for every tool call, including those approved by allow rules, acceptEdits or bypassPermissions, and can deny. canUseTool never sees auto-approved calls, and a prompt is not deterministic enforcement.",
+      "source": "https://code.claude.com/docs/en/agent-sdk/hooks"
+    },
+    {
+      "q": "A PreToolUse hook should block writes to .env files and explain why to the model while showing a note to the end user. Which return value does that?",
+      "options": [
+        "{'continue': False} only",
+        "Raise an exception inside the callback",
+        "{'permissionDecision': 'deny'} at the top level",
+        "hookSpecificOutput with hookEventName, permissionDecision 'deny' and permissionDecisionReason, plus a top-level systemMessage for the user"
+      ],
+      "answer": 3,
+      "explanation": "Decision fields live inside hookSpecificOutput; the reason goes to the model and the top-level systemMessage is shown to the user. Raising an exception by default lets the action proceed unless onFailure is block.",
+      "source": "https://code.claude.com/docs/en/agent-sdk/hooks"
+    },
+    {
+      "q": "A parent agent delegates a research task to a subagent but the subagent keeps asking for details that were discussed earlier in the parent conversation. Why, and what is the fix?",
+      "options": [
+        "Subagents start with fresh context; include the needed paths, errors and decisions in the Agent tool's prompt string",
+        "The subagent lacks the Agent tool; add it to its tools",
+        "Set permissionMode to plan for the subagent",
+        "Subagents inherit the parent's history but it is truncated; raise maxTurns"
+      ],
+      "answer": 0,
+      "explanation": "The only channel from parent to a non-fork subagent is the Agent tool's prompt string (plus its own definition and project CLAUDE.md). Parent history and tool results are not passed.",
+      "source": "https://code.claude.com/docs/en/agent-sdk/subagents"
+    },
+    {
+      "q": "You want a subagent that can analyze code but never modify it, and the parent must be able to invoke it without permission prompts. Which configuration is right?",
+      "options": [
+        "AgentDefinition with tools=['Read','Grep','Glob'] and 'Agent' in the parent's allowedTools",
+        "AgentDefinition without tools and Edit in disallowedTools of the parent",
+        "AgentDefinition with permissionMode='bypassPermissions'",
+        "No AgentDefinition; mention read-only in the parent prompt"
+      ],
+      "answer": 0,
+      "explanation": "A listed tools array is a hard allowlist for the subagent, and including Agent in the parent's allowedTools auto-approves delegating. Omitting tools inherits everything, bypassPermissions is the opposite of safe, and a prompt is not enforcement.",
+      "source": "https://code.claude.com/docs/en/agent-sdk/subagents"
+    },
+    {
+      "q": "A support app serves many users, each with an ongoing agent conversation, on one server process. How should it keep each user's context?",
+      "options": [
+        "Put the history into CLAUDE.md",
+        "Use continue: true for every request",
+        "Store each user's session_id from ResultMessage and pass it as resume",
+        "Use fork_session on every message"
+      ],
+      "answer": 2,
+      "explanation": "continue picks the most recent session in the directory, which would mix users. resume with a stored session ID targets the right session. Forking creates branches and CLAUDE.md is project-level, not per-user history.",
+      "source": "https://code.claude.com/docs/en/agent-sdk/sessions"
+    },
+    {
+      "q": "After starting an Agent SDK run with an HTTP MCP server, Claude answers using built-in web search instead of the server's tools, with no error. What should you check first?",
+      "options": [
+        "Whether the system prompt is custom",
+        "Whether the session was forked",
+        "The init message's mcp_servers status for failed or needs-auth, and that mcp__server__* is in allowedTools",
+        "Whether max_turns is too low"
+      ],
+      "answer": 2,
+      "explanation": "A failed MCP connection does not stop the run; Claude may fall back to other tools. Check server status in the init message (and poll status later) and make sure the tools are permitted via allowedTools.",
+      "source": "https://code.claude.com/docs/en/agent-sdk/mcp"
+    },
+    {
+      "q": "An autonomous Agent SDK job occasionally runs for hours on open-ended prompts and costs too much. Which combination best bounds it?",
+      "options": [
+        "Set max_turns and max_budget_usd (and consider lower effort and limiting subagents)",
+        "Use plan permission mode",
+        "Increase max_tokens",
+        "Lower the model temperature"
+      ],
+      "answer": 0,
+      "explanation": "max_turns and max_budget_usd are the loop limits; they return error_max_turns or error_max_budget_usd results. Effort and subagent limits further reduce cost. Temperature, plan mode and max_tokens do not bound the loop.",
+      "source": "https://code.claude.com/docs/en/agent-sdk/agent-loop"
+    },
+    {
+      "q": "A company needs an Anthropic-hosted agent that runs multi-hour tasks in a sandbox with persistent filesystem and no infrastructure on their side. Their application also exposes an internal ticket lookup that the agent must call. How is the lookup wired in?",
+      "options": [
+        "Declare it as a custom tool on the agent; when the session emits agent.custom_tool_use, run it and send user.custom_tool_result",
+        "Add it as bash command in the agent toolset",
+        "Set a permission policy of always_allow on it so Anthropic runs it",
+        "Put the ticket data in the environment's networking config"
+      ],
+      "answer": 0,
+      "explanation": "Managed Agents custom tools are executed by your application: the agent emits agent.custom_tool_use, the session goes idle with requires_action, and you answer with user.custom_tool_result. Permission policies govern only server-executed tools.",
+      "source": "https://platform.claude.com/docs/en/managed-agents/tools"
+    },
+    {
+      "q": "A Managed Agents session capped with a budget of {amount: \"500\"} reaches the cap while working. What do you observe and how do you continue?",
+      "options": [
+        "user.message events are accepted and automatically raise the cap",
+        "The session terminates; create a new one",
+        "The session goes idle with stop_reason budget_reached; update the budget to a value above consumed list cost (or remove it) to resume",
+        "The session keeps running until the task finishes"
+      ],
+      "answer": 2,
+      "explanation": "At the cap the session pauses idle with budget_reached, preserving history and sandbox. user.message is rejected with a 400; updating the budget above consumed list cost (or removing it) resumes. The amount is in cents, so 500 is $5.00.",
+      "source": "https://platform.claude.com/docs/en/managed-agents/budgets"
+    },
+    {
+      "q": "A Messages API request with tool_choice {'type':'tool','name':'get_weather'} to Claude Sonnet 5.5 returns a 400. What is the recommended alternative to still guarantee schema-valid tool input?",
+      "options": [
+        "Add the tool name to the system prompt in capitals",
+        "Disable parallel tool use",
+        "Use tool_choice auto with strict: true on the tool definition",
+        "Use tool_choice any"
+      ],
+      "answer": 2,
+      "explanation": "Opus 5.5, Sonnet 5.5, Fable 5.1 and Mythos 5.1 reject forced tool use. Use auto with strict tool use to guarantee schema-valid inputs (or structured outputs for a fixed response shape). any is also rejected.",
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools"
+    }
+  ]
+}

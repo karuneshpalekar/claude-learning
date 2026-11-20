@@ -1,0 +1,603 @@
+{
+  "slug": "tech-fundamentals",
+  "title": "Tech Fundamentals",
+  "overview": "This objective covers the technical basics every Claude developer must know from the official docs: how the REST/JSON Messages API works, required headers and API-key auth, SSE streaming, async usage, installing and using the Python and TypeScript SDKs, environment variables, base64 images, JSON schema structured outputs, retries and backoff, batch polling, how Bedrock, Vertex and Foundry differ, and the Console. The exam tests these with scenario questions where a small detail (a header, a retry default, a platform limitation) decides the answer.",
+  "sources": [
+    {
+      "title": "API overview",
+      "url": "https://platform.claude.com/docs/en/api/overview"
+    },
+    {
+      "title": "Errors",
+      "url": "https://platform.claude.com/docs/en/api/errors"
+    },
+    {
+      "title": "Rate limits",
+      "url": "https://platform.claude.com/docs/en/api/rate-limits"
+    },
+    {
+      "title": "Streaming messages",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/streaming"
+    },
+    {
+      "title": "SDKs, CLI, and libraries",
+      "url": "https://platform.claude.com/docs/en/cli-sdks-libraries/overview"
+    },
+    {
+      "title": "Python SDK",
+      "url": "https://platform.claude.com/docs/en/cli-sdks-libraries/sdks/python"
+    },
+    {
+      "title": "TypeScript SDK",
+      "url": "https://platform.claude.com/docs/en/cli-sdks-libraries/sdks/typescript"
+    },
+    {
+      "title": "Get started",
+      "url": "https://platform.claude.com/docs/en/get-started"
+    },
+    {
+      "title": "Vision",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/vision"
+    },
+    {
+      "title": "Structured outputs",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/structured-outputs"
+    },
+    {
+      "title": "Batch processing",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/batch-processing"
+    },
+    {
+      "title": "Claude in Amazon Bedrock",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/claude-in-amazon-bedrock"
+    },
+    {
+      "title": "Claude in Microsoft Foundry",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/claude-in-microsoft-foundry"
+    },
+    {
+      "title": "Claude Models on Google Cloud (Google managed)",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/claude-models-on-google-cloud/google-managed"
+    }
+  ],
+  "sections": [
+    {
+      "heading": "REST API and JSON basics",
+      "notes": [
+        "The Claude API is a RESTful HTTP API at `https://api.anthropic.com`. The core endpoint is `POST /v1/messages`; requests and responses are JSON.",
+        "Other endpoints: Message Batches (`POST /v1/messages/batches`, 50% cost reduction), Token Counting (`POST /v1/messages/count_tokens`), Models (`GET /v1/models`), Files (`POST /v1/files`).",
+        "A successful Messages response is a JSON object with `id`, `type: message`, `role: assistant`, a `content` array of typed blocks (for example `{type: text, text: ...}`), `stop_reason` (for example `end_turn`), and a `usage` object with `input_tokens` and `output_tokens`.",
+        "`model`, `max_tokens` and `messages` are the minimum body fields. Always loop over `content` blocks and check `block.type` rather than assuming `content[0]` is text.",
+        "Request size limits on the first-party API: 128 MB for Messages and Token Counting, 256 MB for Batches, 500 MB for Files. Exceeding them returns 413 `request_too_large`.",
+        "List endpoints paginate. Most use `page`/`next_page` cursors; Batches and Models use `after_id`/`before_id` with `has_more`. SDKs offer auto-pagination iterators."
+      ],
+      "examTips": [
+        "`max_tokens` is required on the Messages API; the model is not defaulted.",
+        "`content` is an array of blocks, not a plain string, in the response.",
+        "Batches allow bigger payloads (256 MB) than Messages (128 MB)."
+      ],
+      "source": "https://platform.claude.com/docs/en/api/overview",
+      "example": {
+        "title": "First request with curl",
+        "language": "bash",
+        "code": "curl https://api.anthropic.com/v1/messages \\\n  -H \"content-type: application/json\" \\\n  -H \"x-api-key: $ANTHROPIC_API_KEY\" \\\n  -H \"anthropic-version: 2026-10-21\" \\\n  -d '{\n    \"model\": \"claude-opus-5-5\",\n    \"max_tokens\": 1000,\n    \"messages\": [{\"role\": \"user\", \"content\": \"Hello, Claude\"}]\n  }'"
+      }
+    },
+    {
+      "heading": "Headers and API-key authentication",
+      "notes": [
+        "Required headers: an auth header, `anthropic-version`, and `content-type: application/json`. Auth is `Authorization: Bearer <token>` (API key or a short-lived token from Workload Identity Federation) or the legacy-but-supported `x-api-key: <key>`.",
+        "`anthropic-version` pins the API version (current docs show `2026-10-21`). Each SDK major version sends one API version by default; a new SDK major accompanies each new API version.",
+        "`anthropic-workspace-id` is required when the API key is not scoped to a workspace (for example personal or service-account keys); a key made for a single workspace uses that workspace when the header is omitted.",
+        "SDKs add the auth, version and content-type headers for you; you supply the workspace header yourself when needed.",
+        "Useful response headers: `request-id` (also `request_id` in error bodies; include it in support tickets), `anthropic-organization-id`, `anthropic-workspace-id`, and the `anthropic-ratelimit-*` family.",
+        "Beta features are enabled with beta headers (SDK: `betas=[...]` on `client.beta.messages`).",
+        "Keys come from the Claude Console (platform.claude.com/settings/keys). Never commit keys; browser use of the TS SDK needs `dangerouslyAllowBrowser: true` and exposes the key, so prefer a backend."
+      ],
+      "examTips": [
+        "Do not confuse `x-api-key` (key) with `anthropic-version` (API version string); both are needed on raw HTTP calls unless using `Authorization: Bearer`.",
+        "`_request_id` is a public property despite the underscore.",
+        "On Vertex (Google managed), the version goes in the body as `anthropic_version`, not a header."
+      ],
+      "source": "https://platform.claude.com/docs/en/api/overview",
+      "example": {
+        "title": "Reading the request ID from the Python SDK",
+        "language": "python",
+        "code": "message = client.messages.create(\n    model=\"claude-sonnet-5\",\n    max_tokens=1024,\n    messages=[{\"role\": \"user\", \"content\": \"Hello, Claude\"}],\n)\nprint(message._request_id)  # e.g. req_018EeWyXxfu5pfWkrYcMdjWG\n\nraw = client.messages.with_raw_response.create(...)\nprint(raw.headers.get(\"request-id\"))\nmessage = raw.parse()"
+      }
+    },
+    {
+      "heading": "Errors, rate limits and exponential backoff",
+      "notes": [
+        "Error status codes: 400 `invalid_request_error`, 401 `authentication_error`, 402 `billing_error`, 403 `permission_error`, 404 `not_found_error`, 409 `conflict_error`, 413 `request_too_large`, 429 `rate_limit_error`, 500 `api_error`, 504 `timeout_error`, 529 `overloaded_error`.",
+        "Error body shape: `{type: error, error: {type, message}, request_id}`.",
+        "SDKs automatically retry transient failures twice by default with short exponential backoff, honoring `retry-after`. Retried: connection errors, 408, 409, 429 and >=500. Configure with `max_retries` (Python) or `maxRetries` (TypeScript); set 0 to disable.",
+        "Rate limits are measured as RPM, ITPM and OTPM per model class and use a token bucket (capacity replenishes continuously, not at fixed resets). Only uncached input tokens count toward ITPM: `cache_read_input_tokens` do not. `max_tokens` does not affect OTPM.",
+        "On 429, wait `retry-after` seconds when present. Sharp usage spikes can trigger acceleration limits, so ramp traffic gradually. A tier spend-cap 429 has no `retry-after` and keeps failing until the next month or a tier increase; `error.details.error_code` is `enforced_spend_limit_reached`.",
+        "A self-set spend limit returns 400, not 429. A 529 means the API is overloaded across all users.",
+        "Rate limit headers: `anthropic-ratelimit-requests|tokens|input-tokens|output-tokens` with `-limit`, `-remaining`, `-reset` (RFC 3339), plus `retry-after`.",
+        "Mid-stream errors can arrive as SSE `error` events after a 200 response, so normal status handling does not catch them."
+      ],
+      "examTips": [
+        "Catch the most specific SDK exception first (`RateLimitError` before `APIStatusError`).",
+        "Retrying a spend-cap 429 is useless; check for the missing `retry-after` and the `enforced_spend_limit_reached` code.",
+        "A 200 response can still end in an SSE error event.",
+        "Cached input tokens do not count toward ITPM, so prompt caching raises effective throughput."
+      ],
+      "source": "https://platform.claude.com/docs/en/api/errors",
+      "example": {
+        "title": "Typed error handling and per-call retries",
+        "language": "python",
+        "code": "import anthropic\nclient = anthropic.Anthropic(max_retries=2)  # default is 2\ntry:\n    msg = client.with_options(max_retries=5).messages.create(\n        model=\"claude-opus-5-5\", max_tokens=1024,\n        messages=[{\"role\": \"user\", \"content\": \"Hello, Claude\"}],\n    )\nexcept anthropic.RateLimitError:\n    print(\"429: wait retry-after, then retry\")\nexcept anthropic.APIConnectionError as e:\n    print(\"could not reach server\", e.__cause__)\nexcept anthropic.APIStatusError as e:\n    print(e.status_code, e.response)"
+      }
+    },
+    {
+      "heading": "Server-sent events (SSE) streaming",
+      "notes": [
+        "Set `\"stream\": true` to receive incremental output as server-sent events. Use streaming for long generations; networks may drop idle connections on large non-streaming requests.",
+        "Event flow: `message_start` (Message with empty content) then, per content block, `content_block_start`, one or more `content_block_delta`, `content_block_stop`; then one or more `message_delta` (top-level changes such as `stop_reason`; `usage` is cumulative); finally `message_stop`. `ping` events may appear anywhere.",
+        "Delta types: `text_delta`, `input_json_delta` (tool input arrives as partial JSON strings you concatenate and parse after `content_block_stop`), `thinking_delta`, `signature_delta`.",
+        "An `error` event (for example `overloaded_error`, which maps to HTTP 529) can appear mid-stream. New event types may be added, so ignore unknown ones gracefully.",
+        "Python: `with client.messages.stream(...) as stream:` then iterate `stream.text_stream` and call `stream.get_final_message()`. TypeScript: `client.messages.stream({...}).on('text', ...)` and `await stream.finalMessage()`. Alternatively `create(..., stream=True)` returns raw events and uses less memory.",
+        "If you do not need incremental output but have a big `max_tokens`, still stream under the hood with `get_final_message()` / `finalMessage()`.",
+        "The Python SDK raises `ValueError` for non-streaming requests expected to exceed about 10 minutes; passing `stream=True` or overriding `timeout` removes that guard. In TS, abort a stream with `break` or `stream.controller.abort()`."
+      ],
+      "examTips": [
+        "Order to remember: message_start, content_block_start/delta/stop, message_delta, message_stop.",
+        "`input_json_delta` is partial JSON, never parse it until the block stops.",
+        "Token counts in `message_delta.usage` are cumulative, not incremental.",
+        "Errors can come after a 200 status as an `error` event."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/streaming",
+      "example": {
+        "title": "Streaming text with the Python SDK",
+        "language": "python",
+        "code": "import anthropic\nclient = anthropic.Anthropic()\n\nwith client.messages.stream(\n    max_tokens=1024,\n    messages=[{\"role\": \"user\", \"content\": \"Hello\"}],\n    model=\"claude-opus-5-5\",\n) as stream:\n    for text in stream.text_stream:\n        print(text, end=\"\", flush=True)\n    final = stream.get_final_message()\n\n# Raw wire format (abridged):\n# event: message_start\n# event: content_block_start\n# event: ping\n# event: content_block_delta  data: {\"delta\": {\"type\": \"text_delta\", \"text\": \"Hello\"}}\n# event: content_block_stop\n# event: message_delta\n# event: message_stop"
+      }
+    },
+    {
+      "heading": "Async patterns",
+      "notes": [
+        "The Python SDK has sync (`Anthropic`) and async (`AsyncAnthropic`) clients with the same interface; async methods are awaited and streams use `async for` / `async with`.",
+        "For higher concurrency in Python, install `anthropic[aiohttp]` and pass `http_client=DefaultAioHttpClient()` (default backend is httpx2).",
+        "The TypeScript SDK is promise-based; `await client.messages.create(...)`, and streams are consumed with `for await`.",
+        "Close clients to free connections: `with Anthropic() as client:` in Python; the async client works as `async with`.",
+        "Async at the API level is the Message Batches API: submit many requests, poll, then fetch results later (see batch section).",
+        "Mind rate limits when fanning out concurrent calls; rely on SDK retries and backoff rather than hammering."
+      ],
+      "examTips": [
+        "`AsyncAnthropic` is a separate class, not a flag on `Anthropic`.",
+        "Streaming with the async client uses `async for` and `await stream.get_final_message()`.",
+        "aiohttp is optional and installed through an extra."
+      ],
+      "source": "https://platform.claude.com/docs/en/cli-sdks-libraries/sdks/python",
+      "example": {
+        "title": "Async client in Python",
+        "language": "python",
+        "code": "import asyncio\nfrom anthropic import AsyncAnthropic\n\nclient = AsyncAnthropic()\n\nasync def main() -> None:\n    message = await client.messages.create(\n        max_tokens=1024,\n        messages=[{\"role\": \"user\", \"content\": \"Hello, Claude\"}],\n        model=\"claude-opus-5-5\",\n    )\n    print(message.content)\n\nasyncio.run(main())"
+      }
+    },
+    {
+      "heading": "SDK installation and client usage (Python and TypeScript)",
+      "notes": [
+        "Python: `pip install anthropic` (Python 3.10+). Extras: `anthropic[bedrock]`, `[vertex]`, `[aws]`, `[google_cloud]`, `[aiohttp]`. Foundry is in the base package.",
+        "TypeScript: `npm install @anthropic-ai/sdk` (TypeScript >= 5.0; Node 20 LTS+, Deno, Bun, Cloudflare Workers, Vercel Edge). React Native is not supported.",
+        "Official SDKs also exist for C#, Go, Java, PHP and Ruby, plus the `ant` CLI. Current versions at time of research: Python 2.6.0, TypeScript 1.6.0.",
+        "Clients read the key from the `ANTHROPIC_API_KEY` environment variable by default, so `Anthropic()` / `new Anthropic()` with no args works. Other env vars: `ANTHROPIC_BASE_URL` (Python), `ANTHROPIC_LOG` (`debug`/`info`; TS also supports `warn`, `error`, `off`).",
+        "Defaults: 2 retries; 10 minute timeout (TS scales the non-streaming timeout up to 60 minutes with a large `max_tokens`); timeout raises `APITimeoutError` (Python) / `APIConnectionTimeoutError` (TS) and is itself retried.",
+        "Configure with constructor options or per-request: Python `client.with_options(max_retries=5, timeout=5.0)`; TS second argument `{ maxRetries: 5, timeout: 5000 }`.",
+        "Typed error classes map to status codes: 400 BadRequestError, 401 AuthenticationError, 403 PermissionDeniedError, 404 NotFoundError, 409 ConflictError, 422 UnprocessableEntityError, 429 RateLimitError, >=500 InternalServerError, plus APIConnectionError.",
+        "Helpers: `client.messages.count_tokens`, `message.usage`, `client.messages.batches`, `client.files.upload`, and tool runners (`@beta_tool` + `client.beta.messages.tool_runner` in Python; `betaZodTool` + `toolRunner` in TS)."
+      ],
+      "examTips": [
+        "Option names differ by language: `max_retries`/`maxRetries`, `api_key`/`apiKey`.",
+        "Do not pass an `httpx` client to the Python SDK: it requires an `httpx2` client (use `DefaultHttpxClient`).",
+        "Set the key with an environment variable or `.env` file, not source code."
+      ],
+      "source": "https://platform.claude.com/docs/en/cli-sdks-libraries/sdks/typescript",
+      "example": {
+        "title": "Hello world in Python and TypeScript",
+        "language": "typescript",
+        "code": "// pip install anthropic\n// import anthropic\n// client = anthropic.Anthropic()   # reads ANTHROPIC_API_KEY\n// msg = client.messages.create(model=\"claude-opus-5-5\", max_tokens=1000,\n//     messages=[{\"role\": \"user\", \"content\": \"Hello, Claude\"}])\n// for block in msg.content:\n//     if block.type == \"text\": print(block.text)\n\n// npm install @anthropic-ai/sdk\nimport Anthropic from \"@anthropic-ai/sdk\";\nconst client = new Anthropic({ maxRetries: 2 }); // apiKey defaults to process.env.ANTHROPIC_API_KEY\nconst message = await client.messages.create({\n  model: \"claude-opus-5-5\",\n  max_tokens: 1000,\n  messages: [{ role: \"user\", content: \"Hello, Claude\" }],\n});\nfor (const block of message.content) {\n  if (block.type === \"text\") console.log(block.text);\n}"
+      }
+    },
+    {
+      "heading": "Environment variables and secrets",
+      "notes": [
+        "`ANTHROPIC_API_KEY` is the standard variable read by the Python, TypeScript and other SDKs and by the `ant` CLI. Export it in your shell, or load a `.env` with python-dotenv, and keep it out of source control.",
+        "`ANTHROPIC_BASE_URL` overrides the endpoint (documented for the Python SDK). `ANTHROPIC_LOG=debug` enables request logging; debug logs include headers and bodies (auth headers redacted), so do not use in production.",
+        "Platform-specific variables: Foundry `ANTHROPIC_FOUNDRY_API_KEY`, `ANTHROPIC_FOUNDRY_RESOURCE`, `ANTHROPIC_FOUNDRY_BASE_URL` (resource and base URL are mutually exclusive); Bedrock `AWS_REGION` (falls back to `AWS_DEFAULT_REGION`), `AWS_BEARER_TOKEN_BEDROCK`, standard `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`; Claude Platform on AWS `ANTHROPIC_AWS_WORKSPACE_ID`; Google Cloud (Anthropic managed) `ANTHROPIC_GOOGLE_CLOUD_WORKSPACE_ID`.",
+        "Alternative to a raw key for local development: `ant auth login`; SDKs and CLI then pick up the credentials automatically. `ANTHROPIC_AUTH_TOKEN` supplies a bearer token to the CLI.",
+        "Keys can have an expiration chosen at creation; use workspaces to separate environments and cap spend."
+      ],
+      "examTips": [
+        "If an SDK client is created with no arguments and the variable is missing, authentication fails (401/credential error), not a default key.",
+        "Never put the real key in a browser bundle."
+      ],
+      "source": "https://platform.claude.com/docs/en/get-started",
+      "example": {
+        "title": "Setting the key",
+        "language": "bash",
+        "code": "export ANTHROPIC_API_KEY=\"your-api-key-here\"\npython quickstart.py\n\n# .env (never commit):\n# ANTHROPIC_API_KEY=\"my-anthropic-api-key\""
+      }
+    },
+    {
+      "heading": "Base64 images and multimodal content",
+      "notes": [
+        "Images go in a user message as `image` content blocks. Three source types: `base64` (`{type, media_type, data}`), `url`, or a Files API `file_id`.",
+        "Supported media types: `image/jpeg`, `image/png`, `image/gif`, `image/webp` (animated GIFs use only the first frame).",
+        "Limits: up to 600 images per request (100 for models with a 200k context window); max 8000x8000 px; request size limit (128 MB on first-party API) may be hit first. Per-image size is 5 MB base64-encoded on Amazon Bedrock.",
+        "Prefer putting images before the text prompt in the same `content` array.",
+        "On Amazon Bedrock and Google-managed Vertex only base64 sources are available (no URL or Files API sources).",
+        "For multi-turn conversations, base64 bytes are resent every turn; upload once with the Files API (first-party API) to reduce payload size.",
+        "Console playground lets you add images directly to a User message for experimenting."
+      ],
+      "examTips": [
+        "`data` is the raw base64 string without a `data:image/...;base64,` prefix.",
+        "`media_type` must match the real format.",
+        "Bedrock/Vertex: URL image sources are not available; convert to base64."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/vision",
+      "example": {
+        "title": "Send a base64 image (Python)",
+        "language": "python",
+        "code": "import base64, anthropic\nclient = anthropic.Anthropic()\n\nwith open(\"photo.jpg\", \"rb\") as f:\n    image_data = base64.standard_b64encode(f.read()).decode(\"utf-8\")\n\nmessage = client.messages.create(\n    model=\"claude-opus-5-5\",\n    max_tokens=1024,\n    messages=[{\n        \"role\": \"user\",\n        \"content\": [\n            {\"type\": \"image\", \"source\": {\n                \"type\": \"base64\",\n                \"media_type\": \"image/jpeg\",\n                \"data\": image_data,\n            }},\n            {\"type\": \"text\", \"text\": \"Describe this image.\"},\n        ],\n    }],\n)\nprint(message.content[0].text)"
+      }
+    },
+    {
+      "heading": "JSON schema and structured outputs",
+      "notes": [
+        "Structured outputs constrain the response to a JSON schema: set `output_config.format = {type: json_schema, schema: {...}}`. The response text is valid JSON you parse with `json.loads`.",
+        "SDK helpers: Python `client.messages.parse(output_format=PydanticModel)` then `response.parsed_output`; TypeScript `zodOutputFormat(schema)` or `jsonSchemaOutputFormat(schema)`.",
+        "Strict tool use: add `\"strict\": true` to a tool definition so tool names and inputs follow `input_schema`. You can combine both features in one request.",
+        "Supported schema features: object, array, string, integer, number, boolean, null; `enum`, `const`, `anyOf`, `allOf` (not with `$ref`), internal `$ref`/`$defs`, `required`, and string formats like `date-time`, `email`, `uuid`. Objects must set `additionalProperties: false`.",
+        "Unsupported: recursive schemas, external `$ref`, numeric constraints (`minimum`, `maximum`), string length constraints, array constraints beyond `minItems` 0 or 1. Using them returns 400.",
+        "Failure modes: `stop_reason: refusal` (200 response, output may not match schema) and `stop_reason: max_tokens` (truncated JSON). Enum casing may vary.",
+        "First request with a new schema is slower (grammar compile, cached 24 hours). `output_format` is deprecated in favor of `output_config.format`; no beta header required.",
+        "Newer models (4.6 and later) reject assistant-message prefill with a 400; use structured outputs or system instructions to force JSON shape instead."
+      ],
+      "examTips": [
+        "`additionalProperties: false` is required on objects.",
+        "Check `stop_reason` before parsing: refusal and max_tokens can break the schema.",
+        "Strict tool use controls tool inputs; `output_config.format` controls the text answer."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/structured-outputs",
+      "example": {
+        "title": "Extract contact info as JSON",
+        "language": "python",
+        "code": "import json\nresponse = client.messages.create(\n    model=\"claude-opus-5-5\",\n    max_tokens=1024,\n    messages=[{\"role\": \"user\", \"content\": \"Extract: John Smith (john@example.com) wants an Enterprise demo Tuesday 2pm.\"}],\n    output_config={\"format\": {\n        \"type\": \"json_schema\",\n        \"schema\": {\n            \"type\": \"object\",\n            \"properties\": {\n                \"name\": {\"type\": \"string\"},\n                \"email\": {\"type\": \"string\"},\n                \"demo_requested\": {\"type\": \"boolean\"},\n            },\n            \"required\": [\"name\", \"email\", \"demo_requested\"],\n            \"additionalProperties\": False,\n        },\n    }},\n)\ntext = next(b.text for b in response.content if b.type == \"text\")\ncontact = json.loads(text)"
+      }
+    },
+    {
+      "heading": "Message Batches: async processing and polling",
+      "notes": [
+        "Message Batches process many Messages requests asynchronously at a 50% cost reduction. Most batches finish within 1 hour.",
+        "Limits: a batch holds up to 100,000 requests or 256 MB, whichever comes first. Batches expire if not finished within 24 hours; results stay downloadable for 29 days.",
+        "Each request has a unique `custom_id` (1-64 chars, `^[a-zA-Z0-9_-]{1,64}$`) and `params` identical to a Messages request. Results may come back in any order, so match by `custom_id`.",
+        "`processing_status` starts `in_progress` and becomes `ended`. `request_counts` tallies processing, succeeded, errored, canceled and expired. Poll `GET /v1/messages/batches/{id}` periodically (docs example sleeps 60 seconds).",
+        "Per-request result types: `succeeded`, `errored` (not billed), `canceled` (not billed), `expired` (not billed).",
+        "Results are streamed as JSONL from `results_url`; SDK: `client.messages.batches.results(batch_id)`.",
+        "Batches API is not available on Bedrock, Foundry or Google-managed Vertex. It is also not ZDR-eligible (29-day retention)."
+      ],
+      "examTips": [
+        "Do not assume result order; use `custom_id`.",
+        "`ended` does not mean every request succeeded; inspect each result type.",
+        "Use batches for non-urgent bulk work; use streaming for long interactive generations."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/batch-processing",
+      "example": {
+        "title": "Create, poll, read results",
+        "language": "python",
+        "code": "import time, anthropic\nclient = anthropic.Anthropic()\n\nbatch = client.messages.batches.create(requests=[\n    {\"custom_id\": \"my-first-request\", \"params\": {\n        \"model\": \"claude-opus-5-5\", \"max_tokens\": 1024,\n        \"messages\": [{\"role\": \"user\", \"content\": \"Hello, world\"}]}},\n    {\"custom_id\": \"my-second-request\", \"params\": {\n        \"model\": \"claude-opus-5-5\", \"max_tokens\": 1024,\n        \"messages\": [{\"role\": \"user\", \"content\": \"Hi again, friend\"}]}},\n])\n\nwhile True:\n    batch = client.messages.batches.retrieve(batch.id)\n    if batch.processing_status == \"ended\":\n        break\n    time.sleep(60)\n\nfor entry in client.messages.batches.results(batch.id):\n    if entry.result.type == \"succeeded\":\n        print(entry.custom_id, entry.result.message.content)"
+      }
+    },
+    {
+      "heading": "Bedrock, Vertex and Foundry differences",
+      "notes": [
+        "Claude is available on the first-party Claude API and cloud platforms. Anthropic-operated: Claude Platform on AWS, Claude Models on Google Cloud (Anthropic managed), Microsoft Foundry. Partner-operated: Amazon Bedrock, Claude Models on Google Cloud (Google managed, the Vertex-style offering). Feature availability varies by platform.",
+        "**Amazon Bedrock** (Messages API at `https://bedrock-mantle.{region}.api.aws/anthropic/v1/messages`): AWS-native auth (service role, IAM assumed roles with SigV4, or short-lived bearer tokens in `x-api-key`); model IDs carry an `anthropic.` prefix (for example `anthropic.claude-opus-5-5`); SDK client `AnthropicBedrockMantle` (`AnthropicBedrock` for the older InvokeModel path); install `anthropic[bedrock]` or `@anthropic-ai/bedrock-sdk`; region from `AWS_REGION`; 20 MB request limit.",
+        "**Vertex / Google managed**: Google Cloud credentials (`gcloud`), requests to `...:rawPredict` (`:streamRawPredict` for streaming) with the model in the URL path, and in raw HTTP `anthropic_version` goes in the body (`vertex-2023-10-16` or `2026-10-21`), not in a header. SDK `AnthropicVertex(project_id, region)`; install `anthropic[vertex]` or `@anthropic-ai/vertex-sdk`; endpoints global, multi-region (`us`/`eu`) or regional; 30 MB payload limit.",
+        "**Microsoft Foundry**: endpoint `https://{resource}.services.ai.azure.com/anthropic/v1/*`; auth by Azure API key (`api-key` or `x-api-key` header) or Entra ID bearer token; the `model` parameter is your deployment name; SDK `AnthropicFoundry` with `ANTHROPIC_FOUNDRY_*` env vars; the Python base package already includes it, TS needs `@anthropic-ai/foundry-sdk`.",
+        "Not available on Bedrock, Vertex (Google managed) or Foundry: Message Batches API, Models API, Admin API, Claude Managed Agents, and server-side fallback. Bedrock and Vertex also lack URL image sources and the Files API.",
+        "Rate limits, billing and quotas are managed by the cloud provider (Bedrock default 2M input TPM; Foundry omits the `anthropic-ratelimit-*` headers). Foundry returns `request-id` plus `apim-request-id`; Claude Platform on AWS adds `x-amzn-requestid`.",
+        "Regional/multi-region endpoints carry a 10 percent premium over global endpoints on Bedrock and Vertex."
+      ],
+      "examTips": [
+        "Bedrock model IDs have the `anthropic.` prefix; Foundry uses the deployment name; Vertex puts the model in the URL.",
+        "The Batches API only exists on the first-party API (and Anthropic-operated AWS and Google Cloud offerings), not Bedrock/Vertex/Foundry.",
+        "Auth: Bedrock uses AWS creds, Vertex uses Google creds, Foundry uses Azure key or Entra ID, first-party uses an Anthropic key."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/claude-in-amazon-bedrock",
+      "example": {
+        "title": "Same call, three clients",
+        "language": "python",
+        "code": "from anthropic import AnthropicBedrockMantle, AnthropicVertex, AnthropicFoundry\n\nbedrock = AnthropicBedrockMantle(aws_region=\"us-east-1\")\nbedrock.messages.create(model=\"anthropic.claude-opus-5-5\", max_tokens=1024,\n    messages=[{\"role\": \"user\", \"content\": \"Hello, Claude\"}])\n\nvertex = AnthropicVertex(project_id=\"MY_PROJECT_ID\", region=\"global\")\nvertex.messages.create(model=\"claude-opus-5-5\", max_tokens=100,\n    messages=[{\"role\": \"user\", \"content\": \"Hey Claude!\"}])\n\nfoundry = AnthropicFoundry(resource=\"example-resource\")  # key from ANTHROPIC_FOUNDRY_API_KEY\nfoundry.messages.create(model=\"claude-opus-5-5\",  # your deployment name\n    max_tokens=1024, messages=[{\"role\": \"user\", \"content\": \"Hello!\"}])"
+      }
+    },
+    {
+      "heading": "Claude Console and playground",
+      "notes": [
+        "The Claude Console (platform.claude.com) is where you create an account, generate API keys (Settings, API keys), manage workspaces, view usage and billing, and see rate limits and spend caps.",
+        "The Console playground (platform.claude.com/playground) lets you try the API in the browser, including adding images to any User message block. The docs now refer to it as the playground; older materials call it the Workbench.",
+        "Workspaces separate environments and let you set lower per-workspace spend and rate limits (you cannot set spend limits on the default workspace).",
+        "Rate limits page shows tier limits and offers Request tier increase; the Usage page charts ITPM/OTPM and cache hit rates. Tiers: Start ($500 monthly cap), Build ($1,000), Scale ($200,000), Custom.",
+        "Quickstart: create a Console account, create a key (or `ant auth login`), `export ANTHROPIC_API_KEY`, then call the API with curl or an SDK. A Workload Identity Federation rule is an alternative to a static key."
+      ],
+      "examTips": [
+        "Keys are made in the Console; the playground is for experimentation, not production traffic.",
+        "Spend limit you set yourself returns 400; tier cap returns 429 without retry-after."
+      ],
+      "source": "https://platform.claude.com/docs/en/get-started"
+    }
+  ],
+  "keyTakeaways": [
+    "Messages API: `POST https://api.anthropic.com/v1/messages`; JSON in and out; `model`, `max_tokens`, `messages` required.",
+    "Raw HTTP needs auth (`x-api-key` or `Authorization: Bearer`), `anthropic-version`, and `content-type: application/json`; SDKs add them.",
+    "SDKs retry 2 times by default (connection errors, 408, 409, 429, >=500) with exponential backoff; default timeout 10 minutes.",
+    "`ANTHROPIC_API_KEY` is read by the SDKs automatically; never hardcode keys.",
+    "SSE order: message_start, content_block_start/delta/stop, message_delta, message_stop; ping and error events can interleave.",
+    "Streaming errors can appear after a 200 status; tool input arrives as `input_json_delta` to concatenate.",
+    "Use `stream()` + `get_final_message()` for long generations to avoid idle-connection timeouts.",
+    "Images: `image` block with base64 `source`, media types jpeg/png/gif/webp, up to 600 per request (100 on 200k-context models).",
+    "Structured outputs: `output_config.format` json_schema with `additionalProperties: false`; numeric/length constraints unsupported; check refusal/max_tokens stop reasons.",
+    "Batches: 50% cheaper, up to 100,000 requests or 256 MB, 24h expiry, results kept 29 days, poll `processing_status` until `ended`, match by `custom_id`.",
+    "Bedrock: `anthropic.` model IDs, AWS auth; Vertex: model in URL and `anthropic_version` in body; Foundry: deployment name, Azure key or Entra ID.",
+    "Batches, Models, Admin APIs and Managed Agents are not available on Bedrock, Vertex (Google managed) or Foundry."
+  ],
+  "glossary": [
+    {
+      "term": "SSE (server-sent events)",
+      "definition": "HTTP streaming format Claude uses when `stream: true`; named events carrying JSON data."
+    },
+    {
+      "term": "anthropic-version",
+      "definition": "Required header selecting the API version; the SDK sets it per major version."
+    },
+    {
+      "term": "x-api-key",
+      "definition": "Header carrying a Console API key; legacy fallback for `Authorization: Bearer`."
+    },
+    {
+      "term": "anthropic-workspace-id",
+      "definition": "Header selecting the workspace for keys not scoped to one."
+    },
+    {
+      "term": "request-id",
+      "definition": "Unique response header (req_...) to quote to support; SDKs expose `_request_id`."
+    },
+    {
+      "term": "max_retries",
+      "definition": "SDK option controlling automatic retries (default 2)."
+    },
+    {
+      "term": "retry-after",
+      "definition": "Response header telling how many seconds to wait before retrying a 429."
+    },
+    {
+      "term": "ITPM / OTPM / RPM",
+      "definition": "Input tokens, output tokens, requests per minute rate limits; cache reads excluded from ITPM."
+    },
+    {
+      "term": "Token bucket",
+      "definition": "Rate limiting algorithm where capacity replenishes continuously up to a maximum."
+    },
+    {
+      "term": "input_json_delta",
+      "definition": "Streaming delta carrying partial JSON of a tool call's input."
+    },
+    {
+      "term": "Structured outputs",
+      "definition": "Schema-constrained JSON via `output_config.format` or `strict: true` tools."
+    },
+    {
+      "term": "Message Batches API",
+      "definition": "Asynchronous bulk Messages processing at 50% cost with polling and JSONL results."
+    },
+    {
+      "term": "custom_id",
+      "definition": "Per-request identifier in a batch used to match unordered results."
+    },
+    {
+      "term": "AnthropicBedrockMantle",
+      "definition": "SDK client for Claude in Amazon Bedrock (recommended for new projects)."
+    },
+    {
+      "term": "AnthropicVertex",
+      "definition": "SDK client for Claude on Google Cloud (Google managed)."
+    },
+    {
+      "term": "AnthropicFoundry",
+      "definition": "SDK client for Claude in Microsoft Foundry."
+    },
+    {
+      "term": "Console playground",
+      "definition": "Browser tool in the Claude Console to try the API, including image input."
+    },
+    {
+      "term": "Workspace",
+      "definition": "Console grouping for separating environments and setting spend/rate limits."
+    }
+  ],
+  "quiz": [
+    {
+      "q": "A developer calls POST https://api.anthropic.com/v1/messages with curl, sending `x-api-key` and `content-type` headers, and gets a 400 error about a missing version. What is missing?",
+      "options": [
+        "An `anthropic-version` header",
+        "A `User-Agent: anthropic-sdk` header",
+        "An `Authorization: Basic` header",
+        "A `request-id` header"
+      ],
+      "answer": 0,
+      "explanation": "`anthropic-version` is required on raw HTTP calls (SDKs add it automatically). request-id is a response header; Basic auth and User-Agent are not required.",
+      "source": "https://platform.claude.com/docs/en/api/overview"
+    },
+    {
+      "q": "Your service sends 10 concurrent requests using the Python SDK with default settings and some return 429 and 529. What happens without custom code?",
+      "options": [
+        "The SDK raises immediately with no retries",
+        "The SDK retries up to 2 times with exponential backoff, honoring `retry-after` when present",
+        "The SDK retries indefinitely until success",
+        "The SDK retries only 5xx, never 429"
+      ],
+      "answer": 1,
+      "explanation": "Default `max_retries` is 2; retried errors include connection errors, 408, 409, 429 and >=500, with exponential backoff honoring retry-after.",
+      "source": "https://platform.claude.com/docs/en/cli-sdks-libraries/sdks/python"
+    },
+    {
+      "q": "Your organization hits the monthly spend cap of its usage tier. The SDK keeps retrying and failing. What distinguishes this 429?",
+      "options": [
+        "It includes a `retry-after` of 60 seconds",
+        "It has no `retry-after` header and `error.details.error_code` is `enforced_spend_limit_reached`",
+        "It is returned as a 402 billing_error",
+        "It is returned as 529"
+      ],
+      "answer": 1,
+      "explanation": "A tier spend-cap 429 has no retry-after and persists until the next month or a tier increase. 402 is for billing issues; 529 is overload.",
+      "source": "https://platform.claude.com/docs/en/api/rate-limits"
+    },
+    {
+      "q": "A streaming client receives HTTP 200 and many text deltas, then an event named `error` with `overloaded_error`. What is the correct interpretation?",
+      "options": [
+        "The HTTP status was wrong; re-read the status line",
+        "A mid-stream error that corresponds to a 529 in non-streaming mode, handled in event processing",
+        "A ping event that can be ignored",
+        "The stream completed successfully"
+      ],
+      "answer": 1,
+      "explanation": "Errors can appear in the SSE stream after a 200 response; overloaded_error maps to 529. Ping events are separate and carry no error.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/streaming"
+    },
+    {
+      "q": "When streaming a tool call, you receive several `input_json_delta` events. How should you build the tool input?",
+      "options": [
+        "Parse each partial_json fragment as JSON immediately",
+        "Concatenate the partial_json strings and parse after `content_block_stop`",
+        "Use only the last delta",
+        "Read `usage` from message_delta"
+      ],
+      "answer": 1,
+      "explanation": "partial_json fragments are not valid JSON individually; accumulate until the block ends, then parse.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/streaming"
+    },
+    {
+      "q": "You need to generate a very long response (max_tokens 128000) and want the final Message object without handling events. What is the best approach?",
+      "options": [
+        "Non-streaming `create` with a large timeout only",
+        "`client.messages.stream(...)` and `get_final_message()` (TS: `finalMessage()`)",
+        "Message Batches API polled every second",
+        "Disable retries"
+      ],
+      "answer": 1,
+      "explanation": "The SDK can stream internally and return the complete Message, avoiding idle-connection timeouts. Without streaming, the SDK warns/raises for requests expected to exceed ~10 minutes.",
+      "source": "https://platform.claude.com/docs/en/api/errors"
+    },
+    {
+      "q": "In the Python SDK, which package install adds Bedrock support and which client class is recommended for new Bedrock projects?",
+      "options": [
+        "`pip install anthropic[bedrock]`, `AnthropicBedrockMantle`",
+        "`pip install anthropic-bedrock`, `AnthropicBedrock`",
+        "`pip install boto3`, `AnthropicAWS`",
+        "`pip install anthropic[vertex]`, `AnthropicVertex`"
+      ],
+      "answer": 0,
+      "explanation": "The `[bedrock]` extra provides both clients; docs say to use AnthropicBedrockMantle for new projects and AnthropicBedrock for existing InvokeModel apps.",
+      "source": "https://platform.claude.com/docs/en/cli-sdks-libraries/sdks/python"
+    },
+    {
+      "q": "A team migrates from the first-party API to Microsoft Foundry and their `model=` value fails with 'Deployment not found'. Most likely cause?",
+      "options": [
+        "Foundry requires `anthropic.` prefixed IDs",
+        "The `model` parameter must be the Foundry deployment name",
+        "Foundry needs `anthropic_version` in the body",
+        "Foundry only accepts bearer tokens"
+      ],
+      "answer": 1,
+      "explanation": "On Foundry the model parameter holds your deployment name (default matches the model ID, but custom names are allowed). The `anthropic.` prefix is Bedrock; body version is Vertex.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/claude-in-microsoft-foundry"
+    },
+    {
+      "q": "An app uses the Message Batches API on first-party Claude API and must move to Amazon Bedrock. Which statement is correct?",
+      "options": [
+        "Batches work identically on Bedrock",
+        "The Message Batches API is not supported on Bedrock, so redesign or keep it on the first-party API",
+        "Batches work on Bedrock only with SigV4",
+        "Batches are supported via the Files API on Bedrock"
+      ],
+      "answer": 1,
+      "explanation": "Bedrock lacks Message Batches, Models, Admin APIs, Files API and Managed Agents per the platform docs.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/claude-in-amazon-bedrock"
+    },
+    {
+      "q": "Which raw-HTTP detail is specific to Claude on Vertex (Google managed)?",
+      "options": [
+        "`anthropic_version` goes in the request body and the model name goes in the URL",
+        "The model name goes in a `x-model` header",
+        "Auth is by `x-api-key` only",
+        "The endpoint is /v1/messages with a bearer Anthropic key"
+      ],
+      "answer": 0,
+      "explanation": "Vertex requests go to `...:rawPredict` with the model in the path, and anthropic_version in the body (for example vertex-2023-10-16).",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/claude-models-on-google-cloud/google-managed"
+    },
+    {
+      "q": "You poll a batch and see `processing_status: ended`. What should you do next?",
+      "options": [
+        "Assume all requests succeeded",
+        "Stream results from `results_url` and inspect each result's type, matching by `custom_id`",
+        "Wait 29 days",
+        "Cancel the batch"
+      ],
+      "answer": 1,
+      "explanation": "ended means processing finished; each request may be succeeded, errored, canceled or expired, and result order is not guaranteed.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/batch-processing"
+    },
+    {
+      "q": "A developer adds a JSON schema with `minimum: 0` on an integer field using `output_config.format`. What is the expected outcome?",
+      "options": [
+        "Works and enforces the minimum",
+        "A 400 error because numeric constraints are unsupported in structured outputs",
+        "Silently ignored with a warning header",
+        "Converted to a string field"
+      ],
+      "answer": 1,
+      "explanation": "Numeric constraints like minimum/maximum are unsupported; using unsupported features returns a 400 (SDK helpers can move them into descriptions).",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/structured-outputs"
+    },
+    {
+      "q": "You send a base64 image to Claude on Amazon Bedrock. Which is true?",
+      "options": [
+        "URL image sources and the Files API are available there",
+        "Only base64 sources are available, and the per-image limit is 5 MB base64-encoded",
+        "Images must be PNG only",
+        "Bedrock supports up to 20 images only"
+      ],
+      "answer": 1,
+      "explanation": "Bedrock only supports base64 image sources with a 5 MB per-image limit and a lower total request size.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/vision"
+    },
+    {
+      "q": "Which `image` block is correct for a JPEG on the Messages API?",
+      "options": [
+        "`{type: image, source: {type: base64, media_type: image/jpeg, data: <base64>}}`",
+        "`{type: image, data: data:image/jpeg;base64,...}`",
+        "`{type: image_url, url: ...}` only",
+        "`{type: file, media_type: jpeg}`"
+      ],
+      "answer": 0,
+      "explanation": "The image block uses a `source` with type base64, media_type and the raw base64 string (no data URI prefix).",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/vision"
+    },
+    {
+      "q": "Prompt caching is applied heavily and your ITPM is nearly exhausted. Which tokens count toward ITPM?",
+      "options": [
+        "All input tokens including cache reads",
+        "`input_tokens` plus `cache_creation_input_tokens` only",
+        "Only output tokens",
+        "`cache_read_input_tokens` only"
+      ],
+      "answer": 1,
+      "explanation": "Cache reads do not count toward ITPM; uncached input and cache-creation tokens do.",
+      "source": "https://platform.claude.com/docs/en/api/rate-limits"
+    }
+  ]
+}

@@ -1,0 +1,564 @@
+{
+  "slug": "systems-life-cycle",
+  "title": "Systems Life Cycle",
+  "overview": "A Claude-powered system is never 'done': it moves through a loop of success criteria, evals, prompt development, deployment, monitoring and iteration, and it must survive model retirements, API version changes, rate limits and outages. The exam tests whether you know which lever to pull at each stage: pinning model IDs, migrating before retirement dates, separating environments with workspaces, reading 429/529 errors correctly, and using the Usage and Cost APIs to monitor spend.",
+  "sources": [
+    {
+      "title": "Define success criteria and build evaluations",
+      "url": "https://platform.claude.com/docs/en/test-and-evaluate/develop-tests"
+    },
+    {
+      "title": "Using the Evaluation Tool",
+      "url": "https://platform.claude.com/docs/en/test-and-evaluate/eval-tool"
+    },
+    {
+      "title": "Console prompting tools",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-tools"
+    },
+    {
+      "title": "Model deprecations",
+      "url": "https://platform.claude.com/docs/en/about-claude/model-deprecations"
+    },
+    {
+      "title": "Models overview",
+      "url": "https://platform.claude.com/docs/en/models/overview"
+    },
+    {
+      "title": "Model IDs and versioning",
+      "url": "https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions"
+    },
+    {
+      "title": "Migration guides",
+      "url": "https://platform.claude.com/docs/en/about-claude/models/migration-guide"
+    },
+    {
+      "title": "Versions (API versioning)",
+      "url": "https://platform.claude.com/docs/en/api/versioning"
+    },
+    {
+      "title": "Rate limits",
+      "url": "https://platform.claude.com/docs/en/api/rate-limits"
+    },
+    {
+      "title": "Service tiers",
+      "url": "https://platform.claude.com/docs/en/api/service-tiers"
+    },
+    {
+      "title": "Workspaces",
+      "url": "https://platform.claude.com/docs/en/manage-claude/workspaces"
+    },
+    {
+      "title": "Usage and Cost API",
+      "url": "https://platform.claude.com/docs/en/manage-claude/usage-cost-api"
+    },
+    {
+      "title": "Claude API errors",
+      "url": "https://platform.claude.com/docs/en/api/errors"
+    },
+    {
+      "title": "Claude status page",
+      "url": "https://status.claude.com"
+    }
+  ],
+  "sections": [
+    {
+      "heading": "The life cycle loop at a glance",
+      "notes": [
+        "The cycle is: **define success criteria -> build evals -> develop the prompt -> deploy -> monitor -> iterate**. Iteration feeds back into evals, because every change (prompt, model, parameters) should be re-measured against the same test set.",
+        "Criteria and evals come BEFORE prompt tuning. Without a measurable target you cannot tell whether a prompt edit or a model swap helped.",
+        "Production operations add a second loop around the first: model deprecations force migrations, API versions change parameters, rate limits cap throughput, and outages happen. Plan for all of these, not just for the happy path.",
+        "Rough mapping of tools to stages: Console prompt generator and Evaluation tool (develop/evals), workspaces and API keys (deploy), response headers, Usage and Cost API and the status page (monitor), deprecation notices and migration guides (iterate)."
+      ],
+      "examTips": [
+        "If a question asks what to do FIRST for a new application, the answer is define measurable success criteria, not write the prompt.",
+        "Any change of model version is a reason to re-run your eval suite before cutover."
+      ],
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/develop-tests"
+    },
+    {
+      "heading": "Success criteria",
+      "notes": [
+        "Good criteria are **specific, measurable, achievable and relevant**. 'Classifies sentiment well' is weak; 'F1 of at least 0.85 on 10,000 held-out tweets' is strong.",
+        "Common dimensions: task fidelity, consistency, relevance and coherence, tone and style, privacy preservation, context utilization, **latency** and **price**. Most real use cases need several measured together.",
+        "Even soft goals can be quantified: for example, 'fewer than 0.1% of 10,000 outputs flagged for toxicity', or a 1-5 Likert scale judged against a rubric.",
+        "Criteria should be achievable: base them on benchmarks, prior experiments or expert knowledge, and keep them realistic for current frontier models."
+      ],
+      "example": {
+        "title": "Turning a vague goal into criteria",
+        "language": "text",
+        "code": "Vague:    \"The support bot should be good.\"\nSpecific: - Task fidelity: >= 90% of answers match the reference resolution (exact/LLM-graded)\n          - Tone: mean >= 4.0 / 5 on empathy rubric (LLM-graded Likert)\n          - Safety: < 0.1% of 10,000 outputs contain PHI\n          - Latency: p95 < 3 s\n          - Cost: < $0.02 per resolved ticket"
+      },
+      "examTips": [
+        "Watch for distractors that sound reasonable but are not measurable ('users should like it').",
+        "Latency and price are legitimate success criteria and trade off against quality when choosing a model."
+      ],
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/develop-tests"
+    },
+    {
+      "heading": "Building evals and grading methods",
+      "notes": [
+        "Eval design principles: be **task-specific** (mirror real traffic and include edge cases such as malformed, very long, ambiguous or irrelevant inputs), **automate** grading where possible, and **prioritize volume over quality** (many auto-graded cases beat a few hand-graded ones).",
+        "Three grading methods: **code-based** (fastest, most reliable, scalable, but lacks nuance), **human** (most flexible and high quality but slow and expensive, avoid if possible), **LLM-based** (fast, flexible, scalable, good for complex judgment; test its reliability first, then scale).",
+        "Tips for LLM grading: write detailed, clear rubrics; make the output empirical or specific (for example only 'correct'/'incorrect', or a 1-5 scale); let the grader reason (thinking on) before it scores.",
+        "Use a different model as the grader than the one that produced the output being evaluated.",
+        "Example eval patterns from the docs: exact match (classification), cosine similarity of embeddings (consistency across paraphrases), ROUGE-L (summarization), LLM Likert (tone), LLM binary (privacy / PHI detection)."
+      ],
+      "example": {
+        "title": "Code-based exact match and LLM binary grader",
+        "language": "python",
+        "code": "def evaluate_exact_match(model_output, correct_answer):\n    return model_output.strip().lower() == correct_answer.lower()\n\ndef llm_grade(client, question, answer, rubric):\n    r = client.messages.create(\n        model=\"claude-opus-5-5\",   # grader differs from the model under test\n        max_tokens=16,\n        messages=[{\"role\": \"user\", \"content\":\n            f\"Rubric: {rubric}\\nQuestion: {question}\\nAnswer: {answer}\\n\"\n            \"Reply with only 'correct' or 'incorrect'.\"}],\n    )\n    return r.content[0].text.strip() == \"correct\""
+      },
+      "examTips": [
+        "Exact match suits closed-label tasks; use LLM grading for open-ended tone or quality judgments.",
+        "Human grading is the gold standard for quality but the exam answer for 'scale to thousands of cases' is automated grading."
+      ],
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/develop-tests"
+    },
+    {
+      "heading": "Prompt development and the Console (Workbench to production)",
+      "notes": [
+        "The Claude Console offers prompting tools: a **prompt generator** that drafts a prompt from a task description, prompt templates with **{{double_brace}} variables**, a prompt improver, and an **Evaluation tool** for running a prompt across test cases.",
+        "The Evaluation tool needs a prompt with dynamic variables ({{variable}}). Test cases can be added manually, generated by Claude, or imported from a CSV, so you can compare prompt versions across the same inputs.",
+        "The Console playground (formerly the Workbench) is for experimentation. Its usage is not tied to an API key: in usage reports `api_key_id` is `null` for playground traffic.",
+        "Moving to production means leaving the playground: copy the prompt into your code (the Console can show the equivalent API request), call it through the SDK with a production API key, and keep the prompt and model ID in version control so changes are reviewable and testable.",
+        "Use **workspaces** to separate environments (development, staging, production) with their own API keys, limits and cost tracking."
+      ],
+      "example": {
+        "title": "Prompt template with variables moved into code",
+        "language": "python",
+        "code": "import anthropic\nclient = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY (production workspace key)\n\nTEMPLATE = \"Summarize this ticket in one sentence:\\n{ticket}\"  # was {{ticket}} in the Console\n\nmsg = client.messages.create(\n    model=\"claude-sonnet-5-5\",\n    max_tokens=256,\n    messages=[{\"role\": \"user\", \"content\": TEMPLATE.format(ticket=\"Login fails after reset\")}],\n)\nprint(msg.content[0].text)"
+      },
+      "examTips": [
+        "Playground/Workbench tests are not a substitute for an eval set: promote to production only after measurable criteria pass.",
+        "Playground usage shows a null API key in the Usage API, which is a common 'why can't I attribute this spend' trap."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-tools"
+    },
+    {
+      "heading": "Environments and workspaces for deployment",
+      "notes": [
+        "Every organization has a **Default Workspace** that cannot be renamed, archived or deleted. Additional workspaces (up to 100 by default) group API keys, members and resource limits. IDs use the `wrkspc_` prefix.",
+        "Recommended pattern: separate **Development, Staging and Production** workspaces so experiments cannot exhaust production limits, and so spend is attributable.",
+        "You can set custom spend and rate limits per workspace (not spend limits on the default workspace). Unset workspace limits match the organization's. Organization-wide limits always apply even if workspace limits add up to more.",
+        "Every request runs in exactly one workspace, determined by the API key. Files, Message Batches and Skills are workspace-scoped, and prompt caches are isolated per workspace on the Claude API.",
+        "The `anthropic-workspace-id` response header tells you which workspace a request counted against."
+      ],
+      "examTips": [
+        "Per-workspace rate limits protect production from a noisy dev environment; they can only be lower than, not above, the organization limit.",
+        "Because caches are workspace-isolated, a cache warmed in staging does not help production."
+      ],
+      "source": "https://platform.claude.com/docs/en/manage-claude/workspaces"
+    },
+    {
+      "heading": "Model IDs: aliases vs pinned snapshots",
+      "notes": [
+        "Each Claude model ID identifies a **pinned version**; the underlying model is constant for the life of that ID. Anthropic does not change weights under an existing ID; updated versions ship under a new ID.",
+        "From the 4.6 generation on, IDs are **dateless** (`claude-sonnet-4-6`, `claude-sonnet-5-5`) but they are NOT evergreen pointers: the dateless ID is itself the snapshot.",
+        "Before 4.6, IDs carry a snapshot date (`claude-sonnet-4-5-20250929`). For those, the Claude API also accepts a shorter **alias** (`claude-sonnet-4-5`) that resolves to the latest dated snapshot of that minor version, so aliases can move; dated IDs do not.",
+        "Platform formats differ: Bedrock uses `anthropic.claude-...` (older ones with `-v1:0`), Google (Google managed) uses `@YYYYMMDD` for dated IDs. Partner platforms set their own lifecycle dates.",
+        "Weights are fixed, but serving infrastructure (router, safety classifiers, sampling logic) can change, so small behavioral differences on a stable ID are possible and most likely an infrastructure update.",
+        "Every model ID, dated or dateless, has its own deprecation and retirement schedule."
+      ],
+      "examTips": [
+        "Production best practice: use an explicit model ID that you have evaluated, not an alias that can move to a new snapshot.",
+        "Misconception to reject: 'dateless means always the latest model'."
+      ],
+      "source": "https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions"
+    },
+    {
+      "heading": "Model deprecations and retirement",
+      "notes": [
+        "Lifecycle states: **Active** (fully supported), **Legacy** (no more updates, may be deprecated later), **Deprecated** (works but not recommended; a replacement and retirement date are assigned), **Retired** (requests fail).",
+        "Anthropic gives at least **60 days' notice** before retiring publicly released models, by email to customers with active deployments and in the docs. Deprecated models are likely to be less reliable than active ones.",
+        "To find where you still use a deprecated model, open the **Usage** page in the Console, click **Export**, and review the CSV broken down by API key and model.",
+        "Example current-docs data point: `claude-sonnet-4-5-20250929` was deprecated September 30, 2026 with retirement November 30, 2026 and recommended replacement `claude-sonnet-5-5`. Dates apply to Anthropic-operated platforms; Bedrock and Google (Google managed) have their own schedules.",
+        "Deprecations also apply to **API parameters**: `temperature`, `top_p` and `top_k` are removed in API version `2026-10-21` (400 error), and newer models reject deprecated parameters even on older API versions.",
+        "Best practices: watch the deprecations page, test replacements well before the retirement date, switch as soon as feasible, contact support for help."
+      ],
+      "example": {
+        "title": "Config-driven model ID so a migration is a one-line change",
+        "language": "python",
+        "code": "import os, anthropic\nMODEL = os.environ.get(\"CLAUDE_MODEL\", \"claude-sonnet-5-5\")  # evaluated, pinned ID\nclient = anthropic.Anthropic()\nmsg = client.messages.create(model=MODEL, max_tokens=512,\n    messages=[{\"role\": \"user\", \"content\": \"ping\"}])\n# Roll out by changing CLAUDE_MODEL after the eval suite passes on the new ID."
+      },
+      "examTips": [
+        "Retired means requests fail; deprecated still works. Do not wait for retirement day to migrate.",
+        "The audit tool for finding stale model usage is the Console Usage page CSV export (by API key and model)."
+      ],
+      "source": "https://platform.claude.com/docs/en/about-claude/model-deprecations"
+    },
+    {
+      "heading": "Migrating to a new model",
+      "notes": [
+        "Use the model-specific **migration guides** (listed on the Migration guides page) because newer models can change supported parameters and behaviors.",
+        "Examples of breaking changes called out in the errors docs: Claude 4.6+ models reject assistant-message prefill (400); Claude 4.7+ reject `thinking: {type: \"enabled\"}` and require adaptive thinking with `output_config.effort`; some current models reject forced `tool_choice` of `any` or a specific tool; some reject `thinking: disabled`.",
+        "Migration workflow: read the guide, update model ID and any removed/renamed parameters, rerun your eval suite on the new model, compare against the criteria (quality, latency, cost), roll out gradually, keep the old ID available until retirement as a rollback.",
+        "Prompts tuned for one generation may need adjusting; the prompting best-practices page has model-specific guidance and migration considerations.",
+        "Larger gains may appear when jumping generations, but only your evals show whether your task improved."
+      ],
+      "examTips": [
+        "A 400 `invalid_request_error` right after a model swap usually means a parameter the new model no longer accepts, not a bad API key.",
+        "Test with your own evals; do not assume a newer or pricier model is better for your task."
+      ],
+      "source": "https://platform.claude.com/docs/en/about-claude/models/migration-guide"
+    },
+    {
+      "heading": "API versioning",
+      "notes": [
+        "Every request must carry an `anthropic-version` header (for example `2026-10-21`). The official SDKs set it for you.",
+        "For a given version Anthropic preserves existing input and output parameters. It may add optional inputs, add output values, change conditions for specific error types, and add new enum-like variants (such as streaming event types). So write clients that tolerate unknown fields and event types.",
+        "Version history: `2023-01-01` initial; `2023-06-01` new incremental, named SSE streaming format; `2026-10-21` removes `temperature`, `top_p`, `top_k` on every model (400), rejects `document` blocks placed directly in assistant messages, and renames several Admin API fields (for example RBAC `roles` -> `role_ids`).",
+        "Anthropic recommends the latest version. Upgrade deliberately using the migration guide, not by accident.",
+        "API version (the header) is separate from model ID; changing one does not change the other. Beta features are enabled separately with beta headers."
+      ],
+      "examTips": [
+        "Do not confuse `anthropic-version` (API contract) with the model snapshot (model behavior).",
+        "Additive changes (new output fields, new stream events) are not considered breaking, so strict parsers that fail on unknown fields are a bug."
+      ],
+      "source": "https://platform.claude.com/docs/en/api/versioning"
+    },
+    {
+      "heading": "Rate limits and usage tiers",
+      "notes": [
+        "Two kinds of limits: **spend limits** (monthly cost cap) and **rate limits** (RPM, ITPM, OTPM per model class). Limits are set per organization by **usage tier** (Start, Build, Scale, Custom; new orgs may begin in an Evaluation tier). Tiers advance automatically with usage history and account standing, or you can use Request tier increase in the Console.",
+        "Monthly spend caps: Start $500, Build $1,000, Scale $200,000; Custom has no cap. Hitting the cap returns **429 rate_limit_error with `error_code: enforced_spend_limit_reached` and no `retry-after`**, so retries (including SDK auto-retries) fail until the next month or a tier increase.",
+        "A spend limit you set yourself (below the tier cap) returns **400 invalid_request_error** instead.",
+        "Rate limiting uses a **token bucket**: capacity refills continuously rather than resetting on a fixed schedule, and short bursts can trigger 429s even if the per-minute average is fine.",
+        "**Cache-aware ITPM**: only `input_tokens` (after the last cache breakpoint) and `cache_creation_input_tokens` count toward ITPM; `cache_read_input_tokens` do NOT. Higher cache hit rate = higher effective throughput. OTPM counts actual generated tokens; `max_tokens` does not factor in.",
+        "On 429, honor the `retry-after` header (seconds). Headers like `anthropic-ratelimit-requests-remaining`, `anthropic-ratelimit-input-tokens-reset` (RFC 3339) show headroom. Sharp traffic spikes can trigger acceleration limits, so ramp up gradually.",
+        "Workspace limits can be set lower than the org limit; the Rate Limits API reads limits and sets workspace limits programmatically. The Message Batches API has its own separate limits."
+      ],
+      "example": {
+        "title": "Handling 429 with retry-after and reading headers",
+        "language": "python",
+        "code": "import anthropic, time\nclient = anthropic.Anthropic(max_retries=2)  # SDK retries 429/5xx with backoff\ntry:\n    raw = client.messages.with_raw_response.create(\n        model=\"claude-sonnet-5-5\", max_tokens=256,\n        messages=[{\"role\": \"user\", \"content\": \"Hi\"}])\n    print(raw.headers.get(\"anthropic-ratelimit-input-tokens-remaining\"))\n    msg = raw.parse()\nexcept anthropic.RateLimitError as e:\n    body = e.body or {}\n    code = (body.get(\"error\", {}).get(\"details\") or {}).get(\"error_code\")\n    if code == \"enforced_spend_limit_reached\":\n        raise  # retrying will not help until the cap resets\n    time.sleep(int(e.response.headers.get(\"retry-after\", 5)))"
+      },
+      "examTips": [
+        "429 with `enforced_spend_limit_reached` is a billing cap, not a rate limit: no retry-after, do not retry.",
+        "Prompt caching raises effective ITPM, so 'we keep hitting ITPM' is often fixed by caching, not by buying a tier."
+      ],
+      "source": "https://platform.claude.com/docs/en/api/rate-limits"
+    },
+    {
+      "heading": "Service tiers: Standard, Priority, Batch",
+      "notes": [
+        "Three service tiers: **Standard** (default, best-effort availability), **Priority** (prioritized capacity, targets 99.5% uptime; only for organizations with an existing capacity commitment, no longer sold), and **Batch** (asynchronous, 50% off, separate limits).",
+        "Request parameter `service_tier`: `auto` (default; use Priority capacity if available, fall back to standard) or `standard_only` (never consume Priority capacity). The response's `usage.service_tier` tells you what was assigned.",
+        "Priority-eligible requests include `anthropic-priority-input-tokens-*` and `anthropic-priority-output-tokens-*` headers. Requests beyond committed capacity fall back to standard.",
+        "Priority Tier requests draw from both Priority capacity and regular rate limits; if they would exceed rate limits they are declined. The docs mark service tiers as legacy and list several newest models as unsupported for Priority Tier.",
+        "For spend and usage tracking, Priority Tier costs are not in the Cost API; use the Usage API and filter or group by `service_tier`."
+      ],
+      "examTips": [
+        "Use Batch for latency-tolerant bulk work (50% discount); use Priority for latency/availability-sensitive production when you hold a commitment.",
+        "`standard_only` is how you opt a request out of Priority capacity, not a way to buy Priority."
+      ],
+      "source": "https://platform.claude.com/docs/en/api/service-tiers"
+    },
+    {
+      "heading": "Monitoring cost and usage: Usage API and Cost API",
+      "notes": [
+        "The Usage and Cost Admin API gives programmatic access to historical usage (`/v1/organizations/usage_report/messages`) and cost (`/v1/organizations/cost_report`). They require **Admin API credentials** (an Admin key `sk-ant-admin01-...`, an `org:admin` OAuth token, or a non-workspace-scoped personal/service key). **Workspace API keys do not work.** Individual accounts have no Admin API; set up an organization first.",
+        "Usage API: time buckets of `1m`, `1h` or `1d` (max 1,440 / 168 / 31 buckets); token counts for uncached input, cached input, cache creation and output; filter and group by model, API key, workspace, service tier, context window, `inference_geo` and `speed`.",
+        "Cost API: daily (`1d`) only, in USD as decimal strings, group by `workspace_id` or `description`. **Priority Tier costs are not included**; code execution costs appear in the cost endpoint (not the usage endpoint).",
+        "Data typically appears within about 5 minutes of request completion; polling once per minute is supported. Pagination uses `has_more` and `next_page`/`page`.",
+        "The docs call this the legacy API for new integrations and recommend the newer **Usage and Cost Analytics API** with more grouping dimensions. Console Usage and Cost pages show the same data, and the Usage page has rate-limit charts and cache hit rate.",
+        "Attribution quirks: playground usage has a null `api_key_id`; the default workspace has a null `workspace_id` in the legacy API."
+      ],
+      "example": {
+        "title": "Daily usage by model (Admin key)",
+        "language": "bash",
+        "code": "curl \"https://api.anthropic.com/v1/organizations/usage_report/messages?\\\nstarting_at=2026-10-01T00:00:00Z&ending_at=2026-10-08T00:00:00Z&\\\ngroup_by[]=model&bucket_width=1d\" \\\n  -H \"anthropic-version: 2026-10-21\" \\\n  -H \"x-api-key: $ANTHROPIC_ADMIN_KEY\""
+      },
+      "examTips": [
+        "'Why does my workspace key get a 401/403 on the usage report?' Because it needs an Admin API credential.",
+        "To track Priority Tier spend, use the Usage endpoint with `service_tier`, not the Cost endpoint.",
+        "Monitoring is also how you verify caching works: watch cache read vs. creation tokens and the cache rate on the Usage page."
+      ],
+      "source": "https://platform.claude.com/docs/en/manage-claude/usage-cost-api"
+    },
+    {
+      "heading": "Errors, request IDs and status",
+      "notes": [
+        "Error codes: **400** `invalid_request_error` (also spend limit you set), **401** `authentication_error`, **402** `billing_error`, **403** `permission_error`, **404** `not_found_error`, **409** `conflict_error`, **413** `request_too_large`, **429** `rate_limit_error`, **500** `api_error`, **504** `timeout_error`, **529** `overloaded_error`.",
+        "Error body shape: top-level `type: \"error\"`, an `error` object with `type` and `message`, and a `request_id`. The same ID is in the `request-id` response header; include it when contacting support. Python/TS SDKs expose `_request_id`.",
+        "**529** means the API is temporarily overloaded across all users (transient); **429** means YOUR org hit a limit. Retry 500/529/429 with exponential backoff; the official SDK retries transient failures twice by default and honors `retry-after`.",
+        "Do not retry 400/401/403/404 blindly: fix the request, key or permissions.",
+        "Long requests: use **streaming** or the **Batch API** for large `max_tokens` or runs over 10 minutes; the SDK refuses non-streaming requests expected to exceed 10 minutes. Errors can also arrive **mid-stream after a 200** as error events.",
+        "Check **status.claude.com** for incidents on the Claude API, Console, claude.ai and Claude Code; it supports email, SMS, Slack, Teams, webhook, RSS and Atom subscriptions, so your on-call can be notified of incidents.",
+        "Request size limits (first-party API): Messages 128 MB, Batch 256 MB, Files 500 MB; exceeding gives 413."
+      ],
+      "example": {
+        "title": "Typed SDK exception handling",
+        "language": "python",
+        "code": "import anthropic\nclient = anthropic.Anthropic()\ntry:\n    msg = client.messages.create(model=\"claude-sonnet-5-5\", max_tokens=256,\n        messages=[{\"role\": \"user\", \"content\": \"Hi\"}])\nexcept anthropic.BadRequestError as e:      # 400: fix request, do not retry\n    print(\"bad request\", e)\nexcept anthropic.RateLimitError as e:       # 429\n    print(\"slow down\", e.response.headers.get(\"retry-after\"))\nexcept anthropic.APIStatusError as e:       # 5xx incl. 529\n    print(\"server-side\", e.status_code, e.response.headers.get(\"request-id\"))"
+      },
+      "examTips": [
+        "529 vs 429: 529 is a platform-wide overload, 429 is your limit. Both are retriable except the spend-cap 429.",
+        "Catch the most specific SDK exception classes first; do not string-match error messages.",
+        "A 200 response does not guarantee a streamed response completes: handle error events."
+      ],
+      "source": "https://platform.claude.com/docs/en/api/errors"
+    }
+  ],
+  "keyTakeaways": [
+    "The loop is criteria -> evals -> prompt development -> deploy -> monitor -> iterate; define measurable criteria before tuning prompts.",
+    "Good success criteria are specific, measurable, achievable and relevant; latency and price count as criteria.",
+    "Prefer many automatically graded test cases over few hand-graded ones; use a different model as LLM grader with a clear rubric and constrained output.",
+    "Claude model IDs are pinned snapshots; dateless IDs from 4.6 on are not evergreen; only pre-4.6 shorthand aliases move to the latest dated snapshot.",
+    "Pin an evaluated model ID in production and make it configurable so migration is a controlled change.",
+    "Deprecated still works, retired fails; Anthropic gives at least 60 days' notice for public models; audit usage via Console Usage CSV export by API key and model.",
+    "Every request needs `anthropic-version`; API versions preserve existing parameters but can add fields, so clients must tolerate additions. `2026-10-21` removes temperature/top_p/top_k.",
+    "ITPM counts only uncached input plus cache creation tokens; cache reads are free against the limit, so caching raises throughput.",
+    "429 with `enforced_spend_limit_reached` has no retry-after and will not recover by retrying; 529 is platform overload and is retriable with backoff.",
+    "Use separate dev/staging/production workspaces with their own keys and limits; workspace limits can only be lower than the org's.",
+    "Usage and Cost APIs need an Admin API credential (not a workspace key); Cost API excludes Priority Tier and is daily only.",
+    "Use streaming or Batch for long requests, log the `request-id`, and watch status.claude.com for incidents."
+  ],
+  "glossary": [
+    {
+      "term": "Success criteria",
+      "definition": "Specific, measurable, achievable, relevant targets (quality, latency, cost, safety) that define whether an application works."
+    },
+    {
+      "term": "Eval",
+      "definition": "A test set with a grading method used to measure how well a prompt/model meets the success criteria."
+    },
+    {
+      "term": "LLM-based grading",
+      "definition": "Using a model with a rubric and constrained output (for example correct/incorrect or 1-5) to score another model's outputs."
+    },
+    {
+      "term": "Snapshot",
+      "definition": "A fixed version of a model identified by its model ID; the weights do not change for that ID."
+    },
+    {
+      "term": "Alias",
+      "definition": "A shorthand ID (for pre-4.6 models, like claude-sonnet-4-5) that points to the latest dated snapshot and can move."
+    },
+    {
+      "term": "Deprecated vs Retired",
+      "definition": "Deprecated: still functional with a replacement and retirement date. Retired: requests fail."
+    },
+    {
+      "term": "anthropic-version",
+      "definition": "Required request header selecting the API contract version, for example 2026-10-21."
+    },
+    {
+      "term": "Usage tier",
+      "definition": "Organization level (Start, Build, Scale, Custom) that sets rate limits and monthly spend cap."
+    },
+    {
+      "term": "ITPM / OTPM / RPM",
+      "definition": "Input tokens, output tokens and requests per minute limits; ITPM excludes cache reads."
+    },
+    {
+      "term": "Token bucket",
+      "definition": "Rate limiting algorithm where capacity refills continuously up to a maximum rather than resetting at fixed intervals."
+    },
+    {
+      "term": "retry-after",
+      "definition": "Response header giving seconds to wait before retrying a 429; absent on the spend-cap 429."
+    },
+    {
+      "term": "service_tier",
+      "definition": "Request parameter (auto or standard_only) controlling whether Priority Tier capacity may be used; response usage reports the assigned tier."
+    },
+    {
+      "term": "Workspace",
+      "definition": "Organizational unit holding API keys, members and limits; used to separate environments and attribute cost."
+    },
+    {
+      "term": "Admin API key",
+      "definition": "Credential (sk-ant-admin01-...) required for organization-level endpoints like usage and cost reports."
+    },
+    {
+      "term": "request_id",
+      "definition": "Unique ID in the request-id header and error body, used when contacting support."
+    },
+    {
+      "term": "529 overloaded_error",
+      "definition": "Temporary platform-wide overload; retry with backoff."
+    }
+  ],
+  "quiz": [
+    {
+      "q": "Your team is starting a new Claude-powered ticket summarizer. Before anyone writes the first production prompt, what should happen first?",
+      "options": [
+        "Define specific, measurable success criteria and an eval set",
+        "Choose the largest available model",
+        "Deploy a prototype to production to collect real traffic",
+        "Request a Priority Tier commitment"
+      ],
+      "answer": 0,
+      "explanation": "The life cycle starts with measurable success criteria and evals so prompt and model changes can be assessed. Picking the largest model, shipping untested, or buying capacity all skip the measurement step; Priority Tier is also no longer sold.",
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/develop-tests"
+    },
+    {
+      "q": "A stakeholder says 'the chatbot should have a friendly tone.' Which rewrite makes this a usable success criterion?",
+      "options": [
+        "Users should feel the bot is nice",
+        "The bot should use many exclamation points",
+        "Tone is not measurable, so skip it",
+        "Mean score of at least 4.0 on a 1-5 empathy rubric graded across 100 sampled inquiries"
+      ],
+      "answer": 3,
+      "explanation": "Criteria should be specific and measurable; a rubric-based Likert score over a defined sample qualifies. The others are vague, a poor proxy, or wrongly claim tone cannot be measured.",
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/develop-tests"
+    },
+    {
+      "q": "You must grade 20,000 open-ended outputs for helpfulness against a detailed rubric nightly. Which approach fits best?",
+      "options": [
+        "Human reviewers grade every output",
+        "Exact string match against one reference answer",
+        "LLM-based grading with a clear rubric and constrained output, using a different model as grader, validated first on a small human-labeled set",
+        "Skip evals and rely on user complaints"
+      ],
+      "answer": 2,
+      "explanation": "LLM grading is scalable and suited to complex judgment once its reliability is checked. Human grading is slow and expensive, exact match fails for open-ended text, and complaints are not an eval.",
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/develop-tests"
+    },
+    {
+      "q": "A developer sets model to `claude-sonnet-4-5` (no date) in production to 'always get the latest Sonnet'. A teammate objects. Which statement is accurate?",
+      "options": [
+        "For pre-4.6 models, the dateless name is an alias that resolves to the latest dated snapshot of that minor version, and it is not a way to auto-get newer generations; pin the evaluated ID in production",
+        "Dateless IDs always track the newest Claude model",
+        "Aliases never change, so it is equivalent to a dated ID",
+        "Dated IDs are retired immediately while aliases live forever"
+      ],
+      "answer": 0,
+      "explanation": "Pre-4.6 aliases point to the most recent dated snapshot of that minor version, so they can move but do not jump to new generations. For production you pin and evaluate a specific ID. Every ID has its own retirement schedule.",
+      "source": "https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions"
+    },
+    {
+      "q": "A colleague claims `claude-sonnet-4-6` is an evergreen pointer that Anthropic silently upgrades. What is the correct response?",
+      "options": [
+        "Correct: dateless IDs are evergreen",
+        "Correct, but only on Amazon Bedrock",
+        "Incorrect: it is retired the moment a new Sonnet ships",
+        "Incorrect: from the 4.6 generation the dateless ID is itself a pinned snapshot, and updates ship under new IDs"
+      ],
+      "answer": 3,
+      "explanation": "The docs state dateless IDs from 4.6 onward map to one fixed snapshot; weights are not updated under an existing ID. Retirement is scheduled separately for each ID, not triggered by new releases.",
+      "source": "https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions"
+    },
+    {
+      "q": "You receive notice that a model your app uses is deprecated with a retirement date 60+ days away. Which plan best reflects Anthropic's guidance?",
+      "options": [
+        "Do nothing until the retirement date; requests will keep working indefinitely",
+        "Evaluate the recommended replacement with your eval suite now, update the model ID and any changed parameters, and migrate before the retirement date",
+        "Switch to an alias so it migrates automatically",
+        "Move all traffic to Priority Tier"
+      ],
+      "answer": 1,
+      "explanation": "Deprecated models still work but are less reliable and fail after retirement. Test the replacement early using your evals and migrate ahead of time. Aliases and Priority Tier do not prevent retirement.",
+      "source": "https://platform.claude.com/docs/en/about-claude/model-deprecations"
+    },
+    {
+      "q": "You need to find which API keys in your organization still call a deprecated model. Which is the documented approach?",
+      "options": [
+        "Email support for a list",
+        "Search your prompts for the string 'deprecated'",
+        "Export the CSV from the Console Usage page, which breaks usage down by API key and model",
+        "Check the status page"
+      ],
+      "answer": 2,
+      "explanation": "The deprecations page recommends the Usage page Export CSV (by API key and model) as an audit. The status page covers incidents, not your usage.",
+      "source": "https://platform.claude.com/docs/en/about-claude/model-deprecations"
+    },
+    {
+      "q": "After upgrading your pinned model, requests that include `temperature` start returning HTTP 400 on every model once you also move to `anthropic-version: 2026-10-21`. What is the most appropriate fix?",
+      "options": [
+        "Remove temperature, top_p and top_k from requests and steer behavior through prompting",
+        "Retry with exponential backoff",
+        "Switch to Priority Tier",
+        "Raise the workspace rate limit"
+      ],
+      "answer": 0,
+      "explanation": "Version 2026-10-21 removes those sampling parameters, so sending them is a client error (400), not a transient one. Backoff, tiers, and limits do not address invalid parameters.",
+      "source": "https://platform.claude.com/docs/en/api/versioning"
+    },
+    {
+      "q": "Your service is intermittently receiving 429 responses with a `retry-after` header and `rate_limit_error` type. Dashboards show a very low prompt-cache hit rate and large repeated system prompts. What is the best first optimization?",
+      "options": [
+        "Increase max_tokens",
+        "Retry immediately in a tight loop",
+        "Switch the API version header",
+        "Enable prompt caching for repeated content, because cache reads do not count toward ITPM, and honor retry-after"
+      ],
+      "answer": 3,
+      "explanation": "Only uncached input and cache-creation tokens count toward ITPM, so caching repeated prompts raises effective throughput; always wait retry-after. max_tokens does not factor into OTPM and tight loops worsen limits.",
+      "source": "https://platform.claude.com/docs/en/api/rate-limits"
+    },
+    {
+      "q": "All requests suddenly return 429 `rate_limit_error` with `details.error_code` = `enforced_spend_limit_reached` and no retry-after header. The SDK keeps auto-retrying. What is happening?",
+      "options": [
+        "A transient RPM spike; retries will recover shortly",
+        "The organization hit its tier's monthly spend cap; retries fail until the next month starts (00:00 UTC) or the tier/limit is raised",
+        "The model is retired",
+        "A 529 overload"
+      ],
+      "answer": 1,
+      "explanation": "That error code identifies the monthly spend cap. There is no retry-after and retries fail until access resumes or a higher tier is granted. A self-set spend limit would instead return a 400.",
+      "source": "https://platform.claude.com/docs/en/api/rate-limits"
+    },
+    {
+      "q": "A dev-team experiment is consuming so much capacity that production requests are being throttled. What is the best structural fix?",
+      "options": [
+        "Use one API key for everything and ask devs to be careful",
+        "Retire the production model",
+        "Create separate development, staging and production workspaces with their own keys, and set lower rate/spend limits on the dev workspace",
+        "Use the Cost API to block dev requests"
+      ],
+      "answer": 2,
+      "explanation": "Workspaces separate environments, and workspace limits (lower than the org's) protect other workspaces from overuse. The Cost API only reports and cannot block traffic.",
+      "source": "https://platform.claude.com/docs/en/manage-claude/workspaces"
+    },
+    {
+      "q": "Finance wants daily cost by workspace. A developer calls `/v1/organizations/cost_report` with a normal workspace API key and gets an auth failure. What is needed?",
+      "options": [
+        "A higher usage tier",
+        "The `service_tier` parameter",
+        "A newer model",
+        "An Admin API credential (such as an `sk-ant-admin01-...` key); workspace keys do not work for these endpoints"
+      ],
+      "answer": 3,
+      "explanation": "Usage and Cost endpoints are Admin API endpoints that need an Admin key (or org:admin OAuth / non-workspace-scoped key). Tiers, service_tier and models are irrelevant to authentication.",
+      "source": "https://platform.claude.com/docs/en/manage-claude/usage-cost-api"
+    },
+    {
+      "q": "Your organization holds a Priority Tier commitment and wants to see how much traffic actually ran as priority. Where should you look?",
+      "options": [
+        "The Usage API, filtering or grouping by `service_tier` (and the response `usage.service_tier`), because Priority Tier costs are not in the Cost API",
+        "The Cost API, which includes Priority Tier lines",
+        "The status page",
+        "The 529 error count"
+      ],
+      "answer": 0,
+      "explanation": "Priority Tier uses a different billing model and is excluded from the cost endpoint; the usage endpoint and per-response `usage.service_tier` expose it.",
+      "source": "https://platform.claude.com/docs/en/manage-claude/usage-cost-api"
+    },
+    {
+      "q": "Your app calls the API for long reports with a very large max_tokens. Users report occasional dropped connections before any response. Which change best matches the docs?",
+      "options": [
+        "Lower the temperature",
+        "Use the streaming Messages API (or Message Batches for non-interactive work) instead of one long non-streaming request",
+        "Switch to a 529 retry policy only",
+        "Add more API keys"
+      ],
+      "answer": 1,
+      "explanation": "Networks can drop idle connections on long requests; streaming or the Batch API (with polling) avoids this, and the SDK warns on non-streaming requests expected to exceed 10 minutes.",
+      "source": "https://platform.claude.com/docs/en/api/errors"
+    },
+    {
+      "q": "During an incident your logs show HTTP 529 `overloaded_error` for many requests, while your own RPM/ITPM headroom is high. How should the client behave and what should on-call check?",
+      "options": [
+        "Treat it as your own rate limit and request a tier increase",
+        "Treat it as a 400 and fix the request body",
+        "Retry with exponential backoff, log the request-id, and check status.claude.com for an incident",
+        "Rotate the API key"
+      ],
+      "answer": 2,
+      "explanation": "529 indicates temporary platform-wide overload, not your limits, so it is retriable with backoff; capture request-id and check the status page. A tier increase and key rotation do not help, and a 400 would be client error.",
+      "source": "https://platform.claude.com/docs/en/api/errors"
+    }
+  ]
+}

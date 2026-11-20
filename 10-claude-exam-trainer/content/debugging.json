@@ -1,0 +1,480 @@
+{
+  "slug": "debugging",
+  "title": "Debugging",
+  "overview": "Debugging covers diagnosing failures across the Claude API (HTTP errors, rate limits, stop reasons, streaming, tool results, cache misses), the surrounding tooling (MCP servers, Claude Code configuration and hooks), and output-quality problems (hallucination and inconsistency). The exam tests whether you can map a symptom to the right cause and fix, for example telling a 429 from a 529, or an exit code 1 from an exit code 2 in a hook.",
+  "sources": [
+    {"title": "Claude API errors", "url": "https://platform.claude.com/docs/en/api/errors"},
+    {"title": "Rate limits", "url": "https://platform.claude.com/docs/en/api/rate-limits"},
+    {"title": "Stop reasons in the Messages API", "url": "https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons"},
+    {"title": "Handle tool calls", "url": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls"},
+    {"title": "Streaming messages", "url": "https://platform.claude.com/docs/en/build-with-claude/streaming"},
+    {"title": "Prompt cache miss troubleshooting", "url": "https://platform.claude.com/docs/en/build-with-claude/prompt-caching"},
+    {"title": "Reduce hallucinations", "url": "https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/reduce-hallucinations"},
+    {"title": "Increase output consistency", "url": "https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/increase-consistency"},
+    {"title": "Claude Code: Debug your configuration", "url": "https://code.claude.com/docs/en/debug-your-config"},
+    {"title": "Claude Code: Troubleshooting", "url": "https://code.claude.com/docs/en/troubleshooting"},
+    {"title": "Claude Code: Error reference", "url": "https://code.claude.com/docs/en/errors"},
+    {"title": "Claude Code hooks", "url": "https://code.claude.com/docs/en/hooks"},
+    {"title": "Claude Code MCP", "url": "https://code.claude.com/docs/en/mcp"},
+    {"title": "MCP debugging", "url": "https://modelcontextprotocol.io/legacy/tools/debugging"}
+  ],
+  "sections": [
+    {
+      "heading": "API HTTP error codes",
+      "notes": [
+        "**400 `invalid_request_error`**: malformed format or content (also a catch-all for other 4xx). Also returned when you hit a spend limit **you set** yourself (org or workspace).",
+        "**401 `authentication_error`**: API key malformed, revoked, or expired. A 401 starting with `CORS requests are not allowed for this Organization` is not a key problem: a browser `Origin` header was sent and the org (for example ZDR) cannot call the API from a browser, so call from your back end.",
+        "**402 `billing_error`**: billing or payment problem. **403 `permission_error`**: the key lacks permission for that resource (check org/workspace settings). **404 `not_found_error`**: wrong endpoint path or resource ID.",
+        "**409 `conflict_error`**: conflicts with current resource state; resolve then retry.",
+        "**413 `request_too_large`**: over byte limits (Messages 128 MB, Token Counting 128 MB, Batch 256 MB, Files 500 MB). On the first-party API, Cloudflare returns it before the request reaches the API servers.",
+        "**429 `rate_limit_error`**: rate limit, acceleration limit, tier monthly spend cap, or Claude Code workspace spend limit. A spend-cap 429 has **no `retry-after`** header and `error.details.error_code` is `enforced_spend_limit_reached`; retrying will not help until access resumes.",
+        "**500 `api_error`**: unexpected internal error; retry with exponential backoff and contact support with the request ID if it persists. **504 `timeout_error`**: request timed out (use streaming or Batches for long requests).",
+        "**529 `overloaded_error`**: API temporarily overloaded across all users. It is not your quota. A sharp traffic spike on your side can instead cause 429 from acceleration limits, so ramp traffic gradually.",
+        "Official SDKs retry connection errors, 429 and 5xx automatically with exponential backoff, **2 times by default**, honoring `retry-after`. Configure with `max_retries`/`maxRetries`. Catch the SDK's typed exceptions (for example `NotFoundError`) rather than string-matching messages."
+      ],
+      "example": {
+        "title": "Error body shape and typed SDK handling",
+        "language": "python",
+        "code": "# Every error body:\n# {\"type\":\"error\",\"error\":{\"type\":\"not_found_error\",\"message\":\"...\"},\"request_id\":\"req_011CSHoEeqs5C35K2UUqR7Fy\"}\nimport anthropic\nclient = anthropic.Anthropic(max_retries=2)\ntry:\n    client.messages.create(model=\"claude-sonnet-5-5\", max_tokens=1024,\n        messages=[{\"role\": \"user\", \"content\": \"Hi\"}])\nexcept anthropic.RateLimitError as e:      # 429\n    print(\"back off\", e.response.headers.get(\"retry-after\"))\nexcept anthropic.AuthenticationError:      # 401\n    print(\"check API key\")\nexcept anthropic.APIStatusError as e:      # other 4xx/5xx\n    print(e.status_code, e.response.headers.get(\"request-id\"))"
+      },
+      "examTips": [
+        "429 = you (rate/acceleration/spend). 529 = Anthropic capacity. Different fixes: slow down/ramp vs. wait/retry/switch model.",
+        "401 is credentials; 403 is a valid key without permission; 404 is wrong path or ID.",
+        "Retrying a spend-cap 429 is useless: no `retry-after`, error_code `enforced_spend_limit_reached`.",
+        "A self-imposed spend limit returns 400, not 429."
+      ],
+      "source": "https://platform.claude.com/docs/en/api/errors"
+    },
+    {
+      "heading": "Request IDs and getting support",
+      "notes": [
+        "Every API response carries a unique `request-id` response header (for example `req_018EeWyXxfu5pfWkrYcMdjWG`). The same value appears as `request_id` in error bodies.",
+        "Include the request ID when contacting support; it is how a specific request is traced.",
+        "Python and TypeScript SDKs expose it as `message._request_id` on top-level response objects. Other SDKs use raw-response accessors. Use `with_raw_response` (TypeScript `.withResponse()`) to read other headers such as `anthropic-organization-id` or `anthropic-workspace-id`.",
+        "With curl, use `-i` to print headers. With the CLI, `--debug` prints the header to stderr.",
+        "On Claude Platform on AWS you get two IDs: `x-amzn-requestid` (AWS, primary, for CloudTrail) and `request-id` (Anthropic, for Anthropic support tickets)."
+      ],
+      "example": {
+        "title": "Log the request ID on every call",
+        "language": "python",
+        "code": "message = client.messages.create(\n    model=\"claude-sonnet-5-5\", max_tokens=1024,\n    messages=[{\"role\": \"user\", \"content\": \"Hello, Claude\"}],\n)\nprint(f\"Request ID: {message._request_id}\")\n\n# Read any other header\nraw = client.messages.with_raw_response.create(model=\"claude-sonnet-5-5\", max_tokens=64,\n    messages=[{\"role\": \"user\", \"content\": \"Hi\"}])\nprint(raw.headers.get(\"request-id\"), raw.headers.get(\"anthropic-ratelimit-requests-remaining\"))\nmsg = raw.parse()"
+      },
+      "examTips": [
+        "Log `request-id` on failures AND successes; you cannot retrieve it later for a response you did not log.",
+        "Header name is `request-id`; body field is `request_id`."
+      ],
+      "source": "https://platform.claude.com/docs/en/api/errors"
+    },
+    {
+      "heading": "Rate limits and response headers",
+      "notes": [
+        "Limits are measured as **RPM, ITPM, OTPM** per model class, set at the organization level by usage tier (Start, Build, Scale, Custom). Workspaces can have lower custom limits; org limits always apply.",
+        "Uses the **token bucket algorithm**: capacity replenishes continuously up to the max, not at fixed resets. A 60 RPM limit may be enforced as 1 request per second, so short bursts can trigger 429.",
+        "**Cache-aware ITPM**: only `input_tokens` (after the last breakpoint) and `cache_creation_input_tokens` count toward ITPM. `cache_read_input_tokens` do **not**. Caching therefore raises effective throughput.",
+        "OTPM is counted on tokens actually generated; `max_tokens` does not affect OTPM, so a high `max_tokens` has no rate-limit downside.",
+        "Headers: `retry-after` (seconds to wait; earlier retries fail; not on every 429), and `anthropic-ratelimit-{requests,tokens,input-tokens,output-tokens}-{limit,remaining,reset}`. Resets are RFC 3339 timestamps; token remaining values are rounded to the nearest thousand.",
+        "`anthropic-ratelimit-tokens-*` shows the most restrictive limit currently in effect. Priority Tier adds `anthropic-priority-*` headers; fast mode adds `anthropic-fast-*`.",
+        "Remedies: honor `retry-after`, exponential backoff, ramp traffic gradually (acceleration limits), use prompt caching, use the Batch API (separate limits), request a tier increase, or set workspace limits to protect other workloads."
+      ],
+      "example": {
+        "title": "Honor retry-after with backoff",
+        "language": "python",
+        "code": "import time, anthropic\nclient = anthropic.Anthropic(max_retries=0)  # manual control\nfor attempt in range(5):\n    try:\n        return client.messages.create(...)\n    except anthropic.RateLimitError as e:\n        ra = e.response.headers.get(\"retry-after\")\n        if ra is None:      # e.g. spend-cap 429: retrying will not help\n            raise\n        time.sleep(float(ra))"
+      },
+      "examTips": [
+        "Cached reads do not count against ITPM; cache writes do.",
+        "`max_tokens` is not part of OTPM accounting.",
+        "Limits are replenished continuously (token bucket), not reset on the minute.",
+        "Sudden usage spikes can give 429 (acceleration) even under your nominal limit."
+      ],
+      "source": "https://platform.claude.com/docs/en/api/rate-limits"
+    },
+    {
+      "heading": "Diagnosing with stop_reason",
+      "notes": [
+        "A successful response always has `stop_reason`. Errors are separate HTTP 4xx/5xx responses. Always branch on it.",
+        "`end_turn`: finished naturally. `max_tokens`: hit your limit, so raise it or continue. `stop_sequence`: one of your stop sequences fired (read `response.stop_sequence`). `tool_use`: run the tool and return a `tool_result`. `pause_turn`: a server-tool loop hit its iteration limit (default 10); resend the assistant content unchanged to continue. `refusal`: declined, arrives as HTTP 200; read `stop_details`, and retry on a fallback model. `model_context_window_exceeded`: response filled the context window, so treat it as truncated.",
+        "**Empty `end_turn`** (2-3 tokens, no content): usually caused by adding text right after `tool_result` blocks. Send tool results alone; do not retry the same request unchanged. Last resort: a continuation prompt in a new user message.",
+        "**`max_tokens` with a truncated `tool_use` block**: retry with a higher `max_tokens`.",
+        "When streaming, `stop_reason` is `null` in `message_start` and appears only in `message_delta`.",
+        "Mark truncated output to readers, for example `[Response truncated due to max_tokens limit]`."
+      ],
+      "example": {
+        "title": "Dispatch on stop_reason",
+        "language": "python",
+        "code": "match response.stop_reason:\n    case \"tool_use\":\n        return handle_tool_use(response)\n    case \"max_tokens\" | \"model_context_window_exceeded\":\n        return handle_truncation(response)\n    case \"pause_turn\":\n        messages.append({\"role\": \"assistant\", \"content\": response.content})\n        # call again (send container id back if present)\n    case \"refusal\":\n        return handle_refusal(response)   # inspect stop_details, try fallback model\n    case _:  # end_turn, stop_sequence\n        return next((b.text for b in response.content if b.type == \"text\"), \"\")"
+      },
+      "examTips": [
+        "Cut-off JSON or prose: check for `max_tokens` first.",
+        "`pause_turn` means continue by sending the content back as-is, not a failure.",
+        "`refusal` is a 200 response, not an HTTP error, so exception handlers will not catch it.",
+        "Empty response after tool results: remove the text you appended after the `tool_result`."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons"
+    },
+    {
+      "heading": "Tool failures and is_error",
+      "notes": [
+        "When your tool code fails, return a `tool_result` with the error text in `content` and `\"is_error\": true`. Claude incorporates the error and can recover or explain.",
+        "Write instructive errors: say what went wrong and what to try next (for example `Rate limit exceeded. Retry after 60 seconds.`), not just `failed`.",
+        "For invalid calls (missing required parameter), improve tool `description` values first; you can also return an `is_error` result and Claude typically retries 2-3 times with corrections. `strict: true` tool use guarantees inputs match the schema.",
+        "**Formatting rules**: the `tool_result` message must immediately follow the assistant `tool_use` message with nothing between; `tool_result` blocks must come **first** in the user content array, with any text after. Violations yield errors like `tool_use ids were found without tool_result blocks immediately after`.",
+        "Return one `tool_result` per `tool_use` id (including parallel calls). `tool_use_id` must match.",
+        "Server tool errors (for example web search `too_many_requests`, `max_uses_exceeded`, `query_too_long`, `unavailable`) are handled by Claude transparently; you do not return `is_error` for them.",
+        "Tool results can carry untrusted content (indirect prompt injection); keep them inside `tool_result` blocks."
+      ],
+      "example": {
+        "title": "Reporting a tool failure",
+        "language": "json",
+        "code": "{\n  \"role\": \"user\",\n  \"content\": [\n    {\n      \"type\": \"tool_result\",\n      \"tool_use_id\": \"toolu_01A09q90qw90lq917835lq9\",\n      \"content\": \"ConnectionError: weather service unavailable (HTTP 500). Retry after 30 seconds or answer without it.\",\n      \"is_error\": true\n    }\n  ]\n}"
+      },
+      "examTips": [
+        "Text before a `tool_result` in the same user message causes a 400.",
+        "Tool exceptions go back to the model as `is_error: true`; they are not raised to the user and do not end the loop.",
+        "Never drop a `tool_use` without answering it; the next request is rejected."
+      ],
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls"
+    },
+    {
+      "heading": "Streaming errors and long requests",
+      "notes": [
+        "With SSE streaming, an error can arrive **after a 200 response** as an `event: error` (for example `overloaded_error`, the streaming equivalent of 529). Normal HTTP status handling does not catch it, so handle error events in your stream loop.",
+        "Use streaming (or the Batch API) for long requests, especially over 10 minutes or with a large `max_tokens`. Networks can drop idle connections. SDKs refuse non-streaming requests expected to exceed 10 minutes and set TCP keep-alive.",
+        "If you do not need incremental events, the SDK can consume the stream and return the final `Message` (`stream.get_final_message()` / `finalMessage()`).",
+        "**Recovering an interrupted stream**: capture the partial response, then continue. On Claude 4.5 and earlier, place the partial text in an assistant message; on 4.6 and later (no prefill), send a user message with the partial response and an instruction to continue.",
+        "Tool use and thinking blocks cannot be partially recovered; resume from the last complete text block.",
+        "Handle unknown event types gracefully; new ones may be added. `ping` events may appear."
+      ],
+      "example": {
+        "title": "Get the full message from a long streamed request",
+        "language": "python",
+        "code": "with client.messages.stream(\n    max_tokens=128000,\n    messages=[{\"role\": \"user\", \"content\": \"Write a detailed analysis...\"}],\n    model=\"claude-sonnet-5-5\",\n) as stream:\n    message = stream.get_final_message()\nprint(message.stop_reason, message._request_id)"
+      },
+      "examTips": [
+        "A mid-stream failure does not change the HTTP status, which was already 200.",
+        "Large `max_tokens` without streaming risks idle-connection timeouts; the fix is streaming or Batches, not a longer client timeout alone.",
+        "Partial tool_use JSON is unusable; retry that block."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/streaming"
+    },
+    {
+      "heading": "Prompt cache misses",
+      "notes": [
+        "Cache misses are silent. Check usage: `cache_read_input_tokens > 0` is a hit. `cache_creation_input_tokens > 0` with reads at 0 on repeat requests means the prefix is changing. **Both zero** usually means the prompt is below the minimum cacheable length (varies by model, for example 512 tokens on Sonnet 5.5/Haiku 5.5, 1,024 on Sonnet 5, 4,096 on Haiku 4.5).",
+        "Cache prefix order is `tools` -> `system` -> `messages`. A change at one level invalidates it and everything after. Changing tool definitions invalidates everything; toggling images or `tool_choice` also invalidates.",
+        "Breakpoint placement: writes happen only at a `cache_control` breakpoint; reads look back at most **20 blocks**. Do not put the breakpoint on a block that changes every request (timestamps, the new user message); put it on the last stable block.",
+        "TTL: default **5 minutes**, refreshed free on each read; clock starts at request start. Use `\"ttl\": \"1h\"` (writes cost 2x base input) for longer gaps.",
+        "Concurrency: an entry is available only after the first response begins, so parallel requests may all miss. Send one first, wait for it to start responding, then fan out.",
+        "Other causes: non-deterministic JSON key order in serialized tool input (Swift, Go), mismatched thinking/effort settings, and mismatched marker positions. Total input = `cache_read + cache_creation + input_tokens`."
+      ],
+      "example": {
+        "title": "Verify cache behavior from usage",
+        "language": "python",
+        "code": "u = response.usage\ntotal = u.cache_read_input_tokens + u.cache_creation_input_tokens + u.input_tokens\nprint(f\"read={u.cache_read_input_tokens} write={u.cache_creation_input_tokens} \"\n      f\"uncached={u.input_tokens} total={total}\")\n# 1h TTL breakpoint on the stable system prompt:\nsystem = [{\"type\": \"text\", \"text\": LONG_SYSTEM,\n           \"cache_control\": {\"type\": \"ephemeral\", \"ttl\": \"1h\"}}]"
+      },
+      "examTips": [
+        "`input_tokens` counts only tokens after the last breakpoint, not the full prompt.",
+        "Dynamic content (timestamps, per-user data) placed before the breakpoint breaks caching; move it after.",
+        "No error is raised for too-short prompts; look at the usage fields."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-caching"
+    },
+    {
+      "heading": "Reducing hallucinations",
+      "notes": [
+        "**Allow Claude to say it does not know**: give explicit permission to admit uncertainty or say information is missing.",
+        "**Ground in direct quotes** for long documents (over about 20k tokens): have Claude extract word-for-word quotes first, then base the analysis only on those quotes.",
+        "**Verify with citations**: require a supporting quote per claim; retract any claim with no supporting quote.",
+        "Advanced: chain-of-thought verification (review summarized thinking), **best-of-N** comparison (inconsistency across runs signals hallucination), iterative refinement (feed output back for verification), and **external knowledge restriction** (use only the provided documents).",
+        "These techniques reduce but do not eliminate hallucinations; validate critical output in high-stakes settings."
+      ],
+      "example": {
+        "title": "Quote-then-analyze prompt",
+        "language": "text",
+        "code": "<policy>{{POLICY}}</policy>\n\n1. Extract exact quotes most relevant to GDPR compliance. If none, say \"No relevant quotes found.\"\n2. Using only those quotes (reference by number), analyze compliance.\nIf the document lacks information, say \"I don't have enough information to confidently assess this.\""
+      },
+      "examTips": [
+        "Fixing hallucination: permit uncertainty, ground in quotes, require citations. Raising temperature or shortening the prompt is not the answer.",
+        "Inconsistent answers across repeated runs (best-of-N) flag likely hallucination."
+      ],
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/reduce-hallucinations"
+    },
+    {
+      "heading": "Increasing output consistency",
+      "notes": [
+        "**Specify the exact output format** (JSON, XML, or a template).",
+        "For guaranteed JSON schema conformance, use **Structured Outputs** rather than prompt techniques.",
+        "**Constrain with examples**: showing the desired output is more effective than abstract instructions.",
+        "**Prefill** the assistant turn to force structure, but prefill is **not supported on Claude 4.6 and later** (returns 400 `invalid_request_error`); use structured outputs or system prompt instructions instead.",
+        "**Retrieval** for contextual consistency: ground answers in a fixed knowledge base.",
+        "**Chain prompts**: break complex tasks into single-purpose subtasks.",
+        "**Keep Claude in character**: define role and personality in the system prompt and prepare it for likely scenarios."
+      ],
+      "example": {
+        "title": "Format spec plus example",
+        "language": "text",
+        "code": "Analyze this feedback and output JSON with keys: \"sentiment\" (positive/negative/neutral),\n\"key_issues\" (list), \"action_items\" (list of {\"team\",\"task\"}).\n\nExample output:\n{\"sentiment\":\"negative\",\"key_issues\":[\"Slow search\"],\"action_items\":[{\"team\":\"Search\",\"task\":\"Profile queries\"}]}"
+      },
+      "examTips": [
+        "Strict schema guarantees -> structured outputs, not prompting.",
+        "Prefilling an assistant message on a 4.6+ model fails with a 400.",
+        "Examples beat abstract instructions for format consistency."
+      ],
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/increase-consistency"
+    },
+    {
+      "heading": "Common 400 validation errors",
+      "notes": [
+        "**Prefill not supported** (Claude 4.6+): the conversation must end with a user message.",
+        "**Thinking blocks cannot be modified**: the latest assistant message's `thinking`/`redacted_thinking` blocks must be passed back exactly as received (including empty ones), especially with tool use.",
+        "**`thinking.type.enabled` not supported** on newer models: use adaptive thinking with `output_config.effort`. Older models reject `adaptive`.",
+        "**Forced tool use** (`tool_choice` any/tool) is rejected on some newer models; use `auto` with strict tool use or structured outputs.",
+        "Tool result ordering errors (text before `tool_result`, missing results) are 400s too."
+      ],
+      "example": {
+        "title": "Typical prefill 400",
+        "language": "json",
+        "code": "{\n  \"type\": \"error\",\n  \"error\": {\n    \"type\": \"invalid_request_error\",\n    \"message\": \"This model does not support assistant message prefill. The conversation must end with a user message.\"\n  }\n}"
+      },
+      "examTips": [
+        "Read the error `message`; it names the offending block position (for example `messages.1.content.0`) and the fix.",
+        "Model-specific parameter support changes over time; check the docs for the target model."
+      ],
+      "source": "https://platform.claude.com/docs/en/api/errors"
+    },
+    {
+      "heading": "MCP debugging",
+      "notes": [
+        "**MCP Inspector** is the first stop: an interactive UI to connect to stdio or Streamable HTTP servers, invoke tools/prompts/resources, and watch notifications, independent of any client.",
+        "**stdio servers must never write to stdout** (it corrupts the protocol). Log to **stderr**, which the host captures. HTTP servers: stderr is not captured, so use your own log aggregation/OpenTelemetry and tools like curl or DevTools.",
+        "Client config pitfalls: working directory may be undefined (use **absolute paths**); stdio servers inherit only a limited set of environment variables, so set an `env` key explicitly; JSON syntax errors; wrong `command` path.",
+        "Claude Desktop logs: `~/Library/Logs/Claude/mcp*.log` (macOS), `%APPDATA%\\Claude\\logs` (Windows). Restart (fully quit) the client after server or config changes.",
+        "**Claude Code**: `claude mcp list` (status: Connected, Needs authentication, Failed to connect, Pending approval), `claude mcp get <name>`, and `/mcp` in-session (status, tool counts, reconnect, auth). Project `.mcp.json` servers need one-time approval. `.mcp.json` lives at the repo root with servers under `mcpServers`; `settings.json` does not read `mcpServers`.",
+        "A server connected with zero tools: use `/mcp` Reconnect, then `claude --debug=mcp` and read the log at `~/.claude/debug/<session-id>.txt`. Relative paths in `command`/`args` resolve from the launch directory.",
+        "Limits and env: `MCP_TIMEOUT` (startup, ms), per-server `timeout`, `MAX_MCP_OUTPUT_TOKENS` (default 25,000). Remote servers returning 401/403 need `claude mcp login`; OAuth cannot run in `claude -p`."
+      ],
+      "example": {
+        "title": "Claude Code MCP triage",
+        "language": "bash",
+        "code": "claude mcp list                 # health of every server\nclaude mcp get notion           # config details\nclaude --debug=mcp              # stderr of servers -> ~/.claude/debug/<session-id>.txt\nMCP_TIMEOUT=10000 claude        # raise startup timeout (ms)\nnpx @modelcontextprotocol/inspector <server-command>   # test the server standalone"
+      },
+      "examTips": [
+        "`print()` to stdout in a stdio server breaks it; log to stderr.",
+        "Server works in Inspector but not in the client: suspect client config (paths, env, approval).",
+        "Project-scope server missing: approval prompt dismissed, or file is in `.claude/` instead of repo root."
+      ],
+      "source": "https://modelcontextprotocol.io/legacy/tools/debugging"
+    },
+    {
+      "heading": "Claude Code troubleshooting",
+      "notes": [
+        "First moves: `/doctor` (installation, settings, extension, context checkup that proposes fixes), `claude doctor` from the shell if it will not start, `/status` (active settings sources, managed settings), `/context` (what is loaded into the context window), `/memory`, `/skills`, `/permissions`, `/mcp`, `/hooks`.",
+        "`/debug [issue]` enables debug logging for the session. `claude --debug` starts with logging. **`claude --safe-mode`** disables CLAUDE.md, skills, plugins, hooks, MCP servers, custom commands and agents, to test whether customization causes the problem; managed policy still applies.",
+        "Clean-config test: `CLAUDE_CONFIG_DIR=<fresh dir> claude --setting-sources user` from an empty directory.",
+        "Settings precedence: managed first, then local > project > user; env vars and flags can also override. `settings.local.json` overrides `settings.json`. `permissions`, `hooks`, `env` belong in `~/.claude/settings.json`, **not** `~/.claude.json`.",
+        "Instruction ignored but loaded in `/context`: usually vague, conflicting, or too long. Use permissions or hooks for hard guarantees; CLAUDE.md is guidance. Subdirectory CLAUDE.md loads on demand.",
+        "Errors: **529** is capacity, not your quota (wait, check status, `/model` switch). Temporary 429s are retried; **spend-limit 429s are not**. Auto-retry is up to 10 times (`CLAUDE_CODE_MAX_RETRIES`); `CLAUDE_CODE_RETRY_WATCHDOG=1` for unattended CI. `Prompt is too long`: `/compact`, `/clear`, smaller reads.",
+        "Performance: `/compact`, restart then `claude --continue`/`--resume`, `/heapdump` for memory, thrashing autocompact means a large file keeps refilling context (read in chunks, use a subagent). Search failures: set `USE_BUILTIN_RIPGREP=0` with system ripgrep."
+      ],
+      "example": {
+        "title": "Isolating a config problem",
+        "language": "bash",
+        "code": "claude doctor                    # settings + install diagnostics, no session\nclaude --safe-mode               # customizations off; does the problem vanish?\nclaude --debug                   # verbose log of hooks, MCP, requests\n# inside a session:\n/context    /status    /hooks    /mcp    /permissions"
+      },
+      "examTips": [
+        "Problem disappears in `--safe-mode` -> cause is CLAUDE.md, a skill, plugin, hook, or MCP server.",
+        "Must-never-happen rules belong in permissions or hooks, not CLAUDE.md.",
+        "Skill must be `.claude/skills/<name>/SKILL.md`, not a bare `name.md`."
+      ],
+      "source": "https://code.claude.com/docs/en/debug-your-config"
+    },
+    {
+      "heading": "Hook debugging",
+      "notes": [
+        "Exit codes: **0** success (JSON in stdout is applied); **2** blocking error on events that can block, with stderr shown as the reason; **any other code, including 1**, is a non-blocking error and the action proceeds. Use `exit 2` for enforcement.",
+        "Stdout on exit 0 usually goes only to the debug log (context only for events like `UserPromptSubmit`, `SessionStart`). Stderr on exit 0 is never seen by Claude. To feed a warning to Claude from `PostToolUse`, exit 2.",
+        "JSON output must be a single JSON object with nothing else on stdout. An `echo` in `.bashrc`/`.zshrc` or extra text corrupts it. Do not mix exit-code and JSON approaches.",
+        "Tools: `/hooks` (read-only list of configured hooks and sources), `claude --debug` (stdout, full stderr, validation errors, matcher checks), or `/debug`.",
+        "Not firing: matcher is case-sensitive and compares against the tool name (`Bash`, not `bash`); use a single string like `Edit|Write`, not a JSON array; `mcp__memory` matches nothing, use `mcp__memory__.*`; `if` works only on tool events; hooks go under `\"hooks\"` in settings files, not a standalone file (only plugins use `hooks/hooks.json`); project settings in untrusted folders do not run.",
+        "Timeouts: defaults 600s command, 30s prompt, 60s agent. A timed-out `PreToolUse` hook does **not** block the call unless `\"onFailure\": \"block\"` is set.",
+        "Test in isolation by piping sample JSON to the script and checking `$?`."
+      ],
+      "example": {
+        "title": "Testing a blocking hook",
+        "language": "bash",
+        "code": "echo '{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"rm -rf /tmp/x\"}}' | ./.claude/hooks/block-rm.sh\necho \"exit: $?\"   # 2 = block (stderr becomes the reason); 1 = NOT blocked\n\n# settings.json\n# {\"hooks\":{\"PreToolUse\":[{\"matcher\":\"Bash\",\"hooks\":[{\"type\":\"command\",\"command\":\"./.claude/hooks/block-rm.sh\"}]}]}}"
+      },
+      "examTips": [
+        "Exit 1 does not block; only exit 2 (or a JSON block decision) does.",
+        "Hook listed in `/hooks` but silent: check matcher case, then run `claude --debug`.",
+        "Hook JSON ignored: look for shell-profile output polluting stdout."
+      ],
+      "source": "https://code.claude.com/docs/en/hooks"
+    }
+  ],
+  "keyTakeaways": [
+    "400 bad request, 401 key, 402 billing, 403 permission, 404 not found, 413 too large, 429 rate/spend, 500 internal, 504 timeout, 529 overloaded.",
+    "529 is Anthropic capacity (retry/wait); 429 is your limits, including acceleration limits from sudden spikes.",
+    "A spend-cap 429 has no `retry-after` and error_code `enforced_spend_limit_reached`; retries cannot fix it. A self-set spend limit returns 400.",
+    "Every response has a `request-id` header (also `request_id` in error bodies); log it and give it to support.",
+    "Rate limits use a token bucket; only uncached input tokens count toward ITPM; `max_tokens` does not affect OTPM.",
+    "Read `retry-after` and `anthropic-ratelimit-*-remaining/reset` headers; SDKs retry twice by default.",
+    "Branch on `stop_reason`: max_tokens (raise/continue), pause_turn (resend content), refusal (200, fallback model), tool_use (return result).",
+    "Return tool failures as `tool_result` with `is_error: true` and an instructive message; `tool_result` blocks come first in the user message.",
+    "Streaming errors can arrive after a 200 as `event: error`; use streaming for long requests and resume from the last complete text block.",
+    "Cache miss: check minimum length, prefix changes (tools, system, messages), breakpoint on a changing block, 5-minute TTL, concurrent first requests.",
+    "Reduce hallucination: allow 'I don't know', quote first, cite and retract; improve consistency: exact format, examples, structured outputs (prefill unsupported on 4.6+).",
+    "stdio MCP servers log to stderr only; hooks block only with exit 2; `claude --safe-mode`, `/doctor`, `/context`, `/hooks`, `/mcp`, `--debug` are the Claude Code diagnostics."
+  ],
+  "glossary": [
+    {"term": "request-id", "definition": "Unique ID in every API response header (and `request_id` in error bodies) used to trace a request with support."},
+    {"term": "retry-after", "definition": "Header giving seconds to wait before retrying a rate-limited request; absent on spend-cap 429s."},
+    {"term": "Token bucket", "definition": "Rate limiting algorithm where capacity replenishes continuously up to a maximum rather than resetting at fixed intervals."},
+    {"term": "ITPM / OTPM / RPM", "definition": "Input tokens, output tokens, and requests per minute limits per model class."},
+    {"term": "Acceleration limit", "definition": "429 triggered by a sharp increase in usage; avoided by ramping traffic gradually."},
+    {"term": "overloaded_error (529)", "definition": "The API is temporarily at capacity across all users; not related to your quota."},
+    {"term": "stop_reason", "definition": "Field on a successful response explaining why generation stopped (end_turn, max_tokens, stop_sequence, tool_use, pause_turn, refusal, model_context_window_exceeded)."},
+    {"term": "pause_turn", "definition": "Stop reason when a server-tool loop hits its iteration limit; resend assistant content to continue."},
+    {"term": "is_error", "definition": "Optional flag on a `tool_result` marking that tool execution failed."},
+    {"term": "cache_read_input_tokens", "definition": "Usage field counting tokens read from the prompt cache; a value above zero means a hit and these tokens do not count toward ITPM."},
+    {"term": "Cache breakpoint", "definition": "A `cache_control` marker where a cache entry is written; reads look back at most 20 blocks."},
+    {"term": "MCP Inspector", "definition": "Interactive tool for testing MCP servers independently of any client."},
+    {"term": "--safe-mode", "definition": "Claude Code launch flag that disables CLAUDE.md, skills, plugins, hooks and MCP servers to isolate configuration problems."},
+    {"term": "Hook exit code 2", "definition": "Blocking error for hook events that can block; stderr is passed to Claude as the reason. Other nonzero codes are non-blocking."}
+  ],
+  "quiz": [
+    {
+      "q": "Your batch job begins returning HTTP 429 with no `retry-after` header. The body has `error.details.error_code` of `enforced_spend_limit_reached`. What is the correct response?",
+      "options": ["Let the SDK retry with exponential backoff until it succeeds", "Recognize a tier spend cap: raise the limit or wait until access resumes; retries will keep failing", "Switch to a different model because of overload", "Reduce max_tokens to lower OTPM"],
+      "answer": 1,
+      "explanation": "A spend-cap 429 has no retry-after and persists until access resumes or the tier is raised. Backoff cannot fix it, it is not overload (that is 529), and max_tokens does not affect OTPM.",
+      "source": "https://platform.claude.com/docs/en/api/rate-limits"
+    },
+    {
+      "q": "During a traffic peak your app receives intermittent HTTP 529 responses on all models, while your dashboard shows usage well under limits. Best interpretation and action?",
+      "options": ["You exceeded RPM; request a tier increase", "The API is temporarily overloaded; retry with backoff, and optionally try another model", "Your API key is revoked; rotate it", "The request exceeded 128 MB; shrink the payload"],
+      "answer": 1,
+      "explanation": "529 `overloaded_error` indicates capacity strain across all users, not your quota. Exceeding limits is 429, a bad key is 401, oversized requests are 413.",
+      "source": "https://platform.claude.com/docs/en/api/errors"
+    },
+    {
+      "q": "A support engineer needs to investigate one failed call. What should your application have logged?",
+      "options": ["The API key used", "The `request-id` response header (or `request_id` in the error body)", "Only the HTTP status code", "The full prompt text"],
+      "answer": 1,
+      "explanation": "Every response includes a unique request ID that support uses to trace the request. Never log keys; status alone and the prompt do not identify the request.",
+      "source": "https://platform.claude.com/docs/en/api/errors"
+    },
+    {
+      "q": "After a sudden 10x ramp in traffic from a new feature, you get 429s even though steady-state usage is below your documented limits. Most likely cause and fix?",
+      "options": ["Acceleration limits; ramp traffic up gradually and keep usage consistent", "Prompt caching is misconfigured; disable it", "max_tokens is too high and counts toward OTPM; lower it", "The model is overloaded; wait for 529 to clear"],
+      "answer": 0,
+      "explanation": "A sharp increase in usage can trigger acceleration-limit 429s. max_tokens does not count toward OTPM, and caching helps ITPM rather than causing 429s.",
+      "source": "https://platform.claude.com/docs/en/api/rate-limits"
+    },
+    {
+      "q": "You have a 2M ITPM limit and about an 80% cache hit rate. Roughly how much total input can you process per minute?",
+      "options": ["2M, since all input counts", "About 10M, because cache reads do not count toward ITPM", "About 4M", "Unlimited, since caching bypasses limits"],
+      "answer": 1,
+      "explanation": "Only `input_tokens` and `cache_creation_input_tokens` count toward ITPM; `cache_read_input_tokens` do not. 2M uncached plus 8M cached gives about 10M. It is not unlimited since uncached tokens still count.",
+      "source": "https://platform.claude.com/docs/en/api/rate-limits"
+    },
+    {
+      "q": "A response contains a JSON tool call that is cut off mid-object and `stop_reason` is `max_tokens`. What do you do?",
+      "options": ["Execute the partial tool call", "Retry the request with a higher `max_tokens`", "Send an `is_error` tool_result and move on", "Switch to stop_sequences"],
+      "answer": 1,
+      "explanation": "A truncated `tool_use` block means the output limit was hit; retry with higher max_tokens. Partial tool inputs are unusable and no valid tool_use id exists to answer.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons"
+    },
+    {
+      "q": "After you append a `tool_result` plus a text line 'Please continue', Claude returns `end_turn` with an empty content array. What is the recommended fix?",
+      "options": ["Resend the identical request until it works", "Send the tool_result alone with no extra text", "Increase temperature", "Add a system prompt prefill"],
+      "answer": 1,
+      "explanation": "Text directly after tool results teaches the model to end its turn. Send tool results alone; retrying unchanged does not help, and prefill is unsupported on newer models.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons"
+    },
+    {
+      "q": "Your agent loop uses server tools and sometimes the response has `stop_reason: pause_turn`. What should the loop do?",
+      "options": ["Treat it as an error and abort", "Append the assistant content unchanged and call the API again", "Switch to a different model", "Drop the server tool from the tools array"],
+      "answer": 1,
+      "explanation": "pause_turn means the server-tool iteration limit was hit; send the content back as an assistant message to continue (including the container ID if present). It is not an error, and dropping tools causes a 400.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons"
+    },
+    {
+      "q": "A client tool's database call times out. How should your loop report this to Claude?",
+      "options": ["Raise an exception and end the conversation", "Return a `tool_result` with `is_error: true` and an instructive message such as what to retry", "Omit the tool_result and send a user text message", "Return an empty tool_result with no flag"],
+      "answer": 1,
+      "explanation": "Failures go back as a tool_result with is_error true and a helpful message so Claude can recover. Omitting a result for a tool_use causes a 400, and an unflagged empty result hides the failure.",
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls"
+    },
+    {
+      "q": "You get a 400 saying `tool_use` ids were found without `tool_result` blocks immediately after. Which cause fits?",
+      "options": ["The key lacks permission", "A text block was placed before the tool_result blocks, or messages were inserted between tool_use and tool_result", "max_tokens is too small", "The cache TTL expired"],
+      "answer": 1,
+      "explanation": "The tool_result message must immediately follow the tool_use message with tool_result blocks first; text only after. The other options produce different errors.",
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls"
+    },
+    {
+      "q": "A user streams a response; the HTTP status was 200 but the stream ends with `event: error` containing `overloaded_error`. What does this show?",
+      "options": ["Errors can occur mid-stream after a 200, so your stream loop must handle error events", "The status code was wrong", "The API key expired mid-request", "The request exceeded 10 minutes by SDK rules"],
+      "answer": 0,
+      "explanation": "SSE errors can arrive after the 200 response and bypass normal HTTP error handling; overloaded_error is the streaming analog of 529.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/streaming"
+    },
+    {
+      "q": "Repeated calls with a 3,000-token cached system prompt show `cache_creation_input_tokens: 3000` and `cache_read_input_tokens: 0` every time, with requests 10 seconds apart. Which is the most likely cause?",
+      "options": ["The prompt is below the minimum length", "The prefix is changing between requests, for example a timestamp earlier than the breakpoint", "The TTL expired between calls", "ITPM was exceeded"],
+      "answer": 1,
+      "explanation": "Writes occurring each time with zero reads means the cached prefix differs per request. Below-minimum would show both fields at 0; 10 seconds is well within the 5-minute TTL; ITPM would give 429.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-caching"
+    },
+    {
+      "q": "You fire 20 parallel requests sharing a large prefix immediately after deploying and nearly all report cache writes with no reads. What is the best fix?",
+      "options": ["Increase max_tokens", "Send one request first and wait for it to begin responding before sending the rest", "Switch to a 1-hour TTL only", "Remove the system prompt"],
+      "answer": 1,
+      "explanation": "A cache entry is available only after the first response starts, so simultaneous first requests all miss. A longer TTL does not solve the race.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-caching"
+    },
+    {
+      "q": "A summarizer over a 60-page contract invents clauses not present. Which change best reduces this?",
+      "options": ["Raise temperature to encourage diversity", "Ask Claude to extract verbatim quotes first, answer only from them, and say when information is missing", "Shorten the document by truncating the middle", "Prefill the answer with 'The contract states'"],
+      "answer": 1,
+      "explanation": "Quote grounding with explicit permission to admit missing information is the documented approach for long documents. Truncation loses data and prefill pushes toward fabrication (and is unsupported on 4.6+).",
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/reduce-hallucinations"
+    },
+    {
+      "q": "Output format varies across runs of a classification prompt, and you need guaranteed schema-valid JSON on a current model. Best approach?",
+      "options": ["Prefill the assistant turn with `{`", "Use structured outputs", "Lower the max_tokens", "Add more adjectives to the prompt"],
+      "answer": 1,
+      "explanation": "Structured outputs give guaranteed schema conformance. Prefill is unsupported on Claude 4.6+ (400), and the others do not enforce structure.",
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/increase-consistency"
+    },
+    {
+      "q": "A PreToolUse hook script is meant to block `rm -rf` commands. It prints a reason to stderr and calls `exit 1`, yet the command still runs. Why?",
+      "options": ["Stderr is ignored on all events", "Exit 1 is a non-blocking error; blocking requires exit 2", "The matcher must be lowercase", "Hooks cannot block Bash"],
+      "answer": 1,
+      "explanation": "Only exit code 2 (or a JSON block decision) blocks on events that can block; any other nonzero code is non-blocking and the action proceeds.",
+      "source": "https://code.claude.com/docs/en/hooks"
+    },
+    {
+      "q": "A hook appears in `/hooks` but never fires for Bash calls. Its matcher is `\"bash\"`. What is the likely problem and next diagnostic?",
+      "options": ["Matchers are case-sensitive; use `Bash`, then confirm with `claude --debug`", "Hooks only work in plugins", "The hook must be in ~/.claude.json", "Exit code 0 disables hooks"],
+      "answer": 0,
+      "explanation": "Matching is case-sensitive against tool names such as Bash. `claude --debug` logs which matchers were checked. ~/.claude.json is app state, not hook config.",
+      "source": "https://code.claude.com/docs/en/debug-your-config"
+    },
+    {
+      "q": "Your custom stdio MCP server works in MCP Inspector but its tools never appear in the client, and it logs progress with `print()`. What is the most important fix?",
+      "options": ["Log to stderr instead of stdout, since stdout carries protocol messages", "Switch to a larger MCP_TIMEOUT only", "Rename the server", "Move settings to ~/.claude.json"],
+      "answer": 0,
+      "explanation": "stdio servers must not write to stdout, which corrupts the JSON-RPC stream; stderr is captured by the host. Timeouts or renaming do not address stdout pollution.",
+      "source": "https://modelcontextprotocol.io/legacy/tools/debugging"
+    },
+    {
+      "q": "In Claude Code, a custom skill and a hook both seem inactive. You want to know quickly whether any customization is responsible. What do you do?",
+      "options": ["Reinstall Claude Code", "Run `claude --safe-mode` and see if the behavior changes", "Delete ~/.claude.json", "Set MAX_MCP_OUTPUT_TOKENS"],
+      "answer": 1,
+      "explanation": "Safe mode disables CLAUDE.md, skills, plugins, hooks and MCP servers; if the problem disappears the cause is among them, then use /context, /hooks and /mcp to narrow down.",
+      "source": "https://code.claude.com/docs/en/debug-your-config"
+    }
+  ]
+}

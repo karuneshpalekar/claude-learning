@@ -1,0 +1,649 @@
+{
+  "slug": "tool-implementation",
+  "title": "Tool Implementation",
+  "overview": "Tool use lets Claude call functions you define (client tools) or that Anthropic runs (server tools). This objective covers how to define tools, control selection with tool_choice, run the tool_use/tool_result loop correctly (including parallel calls and errors), use Anthropic-provided tools (web search/fetch, code execution, bash, text editor, memory, computer use), and scale and harden tool use (tool search, programmatic calling, strict mode, streaming, runner). The exam tests exact message-formatting rules and knowing who executes which tool.",
+  "sources": [
+    {
+      "title": "Tool use with Claude (overview, pricing/token overhead)",
+      "url": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/overview"
+    },
+    {
+      "title": "Define tools",
+      "url": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools"
+    },
+    {
+      "title": "Handle tool calls",
+      "url": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls"
+    },
+    {
+      "title": "Parallel tool use",
+      "url": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/parallel-tool-use"
+    },
+    {
+      "title": "Tool runner (SDK)",
+      "url": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-runner"
+    },
+    {
+      "title": "Strict tool use",
+      "url": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/strict-tool-use"
+    },
+    {
+      "title": "Fine-grained tool streaming",
+      "url": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/fine-grained-tool-streaming"
+    },
+    {
+      "title": "Server tools",
+      "url": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/server-tools"
+    },
+    {
+      "title": "Web search tool",
+      "url": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-search-tool"
+    },
+    {
+      "title": "Web fetch tool",
+      "url": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-fetch-tool"
+    },
+    {
+      "title": "Code execution tool",
+      "url": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/code-execution-tool"
+    },
+    {
+      "title": "Programmatic tool calling",
+      "url": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/programmatic-tool-calling"
+    },
+    {
+      "title": "Tool search tool",
+      "url": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool"
+    },
+    {
+      "title": "Memory tool",
+      "url": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/memory-tool"
+    },
+    {
+      "title": "Text editor tool",
+      "url": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/text-editor-tool"
+    },
+    {
+      "title": "Bash tool",
+      "url": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/bash-tool"
+    },
+    {
+      "title": "Computer use tool",
+      "url": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/computer-use-tool"
+    },
+    {
+      "title": "Writing tools for agents",
+      "url": "https://www.anthropic.com/engineering/writing-tools-for-agents"
+    }
+  ],
+  "sections": [
+    {
+      "heading": "Defining tools: name, description, input_schema",
+      "notes": [
+        "A user-defined (client) tool is declared in the top-level `tools` array of a Messages API request with three core fields: `name`, `description`, and `input_schema` (a JSON Schema object). `input_examples` is an optional fourth field.",
+        "`name` must match the regex `^[a-zA-Z0-9_-]{1,128}$`. `description` is a plain-text explanation of what the tool does, when to use it, and how it behaves.",
+        "The docs call detailed descriptions **by far the most important factor** in tool performance. Aim for at least 3-4 sentences per tool: what it does, when to use it (and when not to), what each parameter means, and caveats such as what data it does NOT return.",
+        "Use `input_examples` (array of schema-valid example inputs) for tools with nested objects, optional params or format-sensitive inputs. Invalid examples return a 400. They are not supported on server tools or on the computer/browser toolsets, and cost roughly 20-50 tokens (simple) to 100-200 tokens (complex nested) each.",
+        "Other optional definition properties include `cache_control`, `strict`, `defer_loading`, `allowed_callers` and `eager_input_streaming`.",
+        "When `tools` is present the API builds a special tool-use system prompt from your definitions, tool configuration and your own system prompt.",
+        "Anthropic-schema client tools (bash, text editor, memory) are declared with a date-versioned `type` and are schema-less: you do not provide an `input_schema` because the schema is built into the model."
+      ],
+      "examTips": [
+        "Trap: a short description plus a bare schema is the classic 'poor' definition. When Claude picks the wrong tool or wrong arguments, the first fix is a richer `description`, not more prompt text.",
+        "`input_schema` is the key for custom tools. Anthropic-defined tools such as `bash` have a `type` and `name` but no `input_schema`.",
+        "Consolidate related operations into fewer tools (one tool with an `action` parameter instead of create_pr/review_pr/merge_pr) and namespace names by service (`github_list_prs`, `slack_send_message`)."
+      ],
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools",
+      "example": {
+        "title": "Well-described tool definition",
+        "language": "json",
+        "code": "{\n  \"name\": \"get_stock_price\",\n  \"description\": \"Retrieves the current stock price for a given ticker symbol. The ticker must be a valid symbol for a publicly traded company on a major US exchange like NYSE or NASDAQ. Returns the latest trade price in USD. Use when the user asks about the current or most recent price of a specific stock. It will not provide any other information about the stock or company.\",\n  \"input_schema\": {\n    \"type\": \"object\",\n    \"properties\": {\n      \"ticker\": {\n        \"type\": \"string\",\n        \"description\": \"The stock ticker symbol, e.g. AAPL for Apple Inc.\"\n      }\n    },\n    \"required\": [\n      \"ticker\"\n    ]\n  }\n}"
+      }
+    },
+    {
+      "heading": "Best practices for tool definitions and responses",
+      "notes": [
+        "Return only high-signal information from tools: stable semantic identifiers (slugs, UUIDs) and only the fields Claude needs for its next step. Bloated responses waste context.",
+        "If a parameter asks Claude why it is calling the tool, ask for a short explanation or supporting evidence, not 'step-by-step reasoning'. Asking for reasoning can trigger a `reasoning_extraction` refusal.",
+        "Write instructive error messages in tool results: say what went wrong and what Claude should try next (for example 'Rate limit exceeded. Retry after 60 seconds.') rather than a generic 'failed'.",
+        "The docs recommend consolidating related operations into fewer, more capable tools to reduce selection ambiguity, and using consistent namespacing so tool search can match whole groups with one query."
+      ],
+      "examTips": [
+        "Distinguish the two sources: the API docs page 'Define tools' (consolidate, namespace, high-signal responses, detailed descriptions) and the engineering post 'Writing tools for agents' (next section).",
+        "Claude (particularly Sonnet) may guess a missing required parameter instead of asking; Opus is more likely to ask. Strict tool use or better descriptions reduce bad guesses; this behavior is not guaranteed."
+      ],
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools"
+    },
+    {
+      "heading": "Writing tools for agents (engineering guidance)",
+      "notes": [
+        "Process: build a quick prototype (for example a local MCP server), create realistic evaluation tasks that may need dozens of tool calls, give each a verifiable outcome, run each as a simple agent loop, track accuracy, runtime, tool calls, tokens and errors, then READ the transcripts and let Claude help refactor the tools; validate on a held-out set.",
+        "Choose the right tools: more tools do not automatically help, and wrapping raw API endpoints is a common mistake. Prefer `search_contacts` over `list_contacts` that dumps everything; consolidate multi-step work (one `schedule_event` instead of list_users + list_events + create_event; `get_customer_context` instead of three lookups).",
+        "Namespace tools with service/resource prefixes (for example `asana_projects_search`). Prefix vs suffix naming measurably changed eval results, so test your scheme.",
+        "Return meaningful context: natural-language names beat low-level identifiers (cryptic UUIDs/MIME types). Mapping arbitrary UUIDs to readable names or 0-indexed IDs reduced hallucinations. A `response_format` enum (concise/detailed) cut tokens to about a third in the Slack example (72 vs 206 tokens).",
+        "Optimize for token efficiency: pagination, range selection, filtering and truncation with sensible defaults (Claude Code caps tool responses at 25,000 tokens by default). When truncating, tell the agent how to narrow its search. Error messages should state what to fix with examples of valid input, not opaque codes or tracebacks.",
+        "Prompt-engineer descriptions like you would brief a new hire: explain query formats, niche terms and resource relationships; use unambiguous parameter names (`user_id`, not `user`). Small description tweaks can have large effects."
+      ],
+      "examTips": [
+        "Likely question shapes: agent keeps calling a tool that returns huge payloads (add pagination/filtering/response_format and truncation guidance); agent confuses similar tools (namespace/consolidate/clarify descriptions); tool returns UUIDs and agent hallucinates (return names or readable IDs).",
+        "Evaluate with realistic, multi-step tasks and read transcripts; redundant calls suggest pagination/limits need tuning, repeated invalid-parameter errors suggest description problems."
+      ],
+      "source": "https://www.anthropic.com/engineering/writing-tools-for-agents"
+    },
+    {
+      "heading": "tool_choice: auto, any, tool, none",
+      "notes": [
+        "`tool_choice` has four modes: `auto` (default when tools are provided; Claude decides), `any` (must call one of the provided tools, no specific one), `tool` (must call the named tool), and `none` (no tools; default when no tools are provided).",
+        "With `any` or `tool` the API prefills the assistant turn, so Claude emits NO natural-language text before the `tool_use` block, even if asked. To get explanation plus a tool call, use `auto` and instruct it in the user message.",
+        "Forcing a tool skips thinking: the response starts with the tool call and has no `thinking` block. With manual extended thinking (`thinking: {type: 'enabled'}`), `any` and `tool` return an error; use `auto` or `none`.",
+        "Claude Opus 5.5, Sonnet 5.5, Fable 5.1 and Mythos 5.1 reject `any` and `tool` with a 400. On those models use `auto` with strict tool use (guaranteed schema-valid inputs) or structured outputs for a fixed JSON shape.",
+        "Changing `tool_choice` invalidates cached message blocks (tool definitions and system prompt stay cached).",
+        "On models that support it, combine `any` with `strict: true` to guarantee both that some tool is called and that inputs match the schema.",
+        "To make `auto` call tools more or less often, steer with the system prompt (for example 'Use the tools to investigate before responding')."
+      ],
+      "examTips": [
+        "`any` = must use SOME tool; `tool` = must use THIS tool; `auto` = may answer in text; `none` = never call tools.",
+        "Scenario trap: the user wants Claude to explain its plan before calling the tool but you set `tool_choice: tool`. Correct answer: forced choices prefill the turn, so switch to `auto` and ask for the explanation in the prompt.",
+        "Scenario trap: forced tool use on Opus 5.5 / Sonnet 5.5 returns 400; the fix is `auto` + `strict: true`, not retrying."
+      ],
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools",
+      "example": {
+        "title": "Forcing a specific tool",
+        "language": "python",
+        "code": "response = client.messages.create(\n    model=\"claude-opus-5\",\n    max_tokens=1024,\n    tools=tools,\n    tool_choice={\"type\": \"tool\", \"name\": \"get_weather\"},\n    messages=[{\"role\": \"user\", \"content\": \"What's the weather like in San Francisco?\"}],\n)"
+      }
+    },
+    {
+      "heading": "tool_use and tool_result blocks, tool_use_id, and the client tool loop",
+      "notes": [
+        "Client tools run in YOUR application. Claude responds with `stop_reason: \"tool_use\"` and one or more `tool_use` content blocks containing `id`, `name` and `input` (conforming to the schema).",
+        "Your code runs the operation, then sends a NEW `user` message whose content has a `tool_result` block with `tool_use_id` (the `id` of the matching call), optional `content`, and optional `is_error`. Resend the assistant message (its content blocks) in the history before the result.",
+        "`tool_result.content` may be a string, a list of nested content blocks (`text`, `image`, `document`, `search_result`), or a list of document blocks; it may even be omitted (empty result).",
+        "The loop: send request, check `stop_reason`; if `tool_use`, execute every call, append assistant message plus a user message with all results, call the API again; stop when `stop_reason` is `end_turn` (or another non-tool reason). Bound it with a max iteration count.",
+        "The Claude API has no special `tool`/`function` role (unlike some other APIs): tool calls live inside `assistant` messages and results inside `user` messages.",
+        "Tool results often contain untrusted content (web pages, email, uploads). Keep it inside `tool_result` blocks, not system prompts or plain user text, and treat it as a prompt-injection vector.",
+        "Claude often emits a `text` block (for example 'I'll check the weather') before the `tool_use` block; never rely on specific phrasing."
+      ],
+      "examTips": [
+        "Formatting rule 1: the `tool_result` message must IMMEDIATELY follow the assistant message with the `tool_use` (no messages in between).",
+        "Formatting rule 2: in the user message, `tool_result` blocks come FIRST; any text goes AFTER all results. Text before a result causes a 400.",
+        "Error text to recognize: 'tool_use ids were found without tool_result blocks immediately after' means your result formatting/ordering/ids are wrong.",
+        "The `id` of `tool_use` (prefix `toolu_`) is echoed as `tool_use_id` in the result. Server tool ids use the `srvtoolu_` prefix and are never answered with a `tool_result`."
+      ],
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls",
+      "example": {
+        "title": "Manual client tool round trip",
+        "language": "python",
+        "code": "tools = [{\n    \"name\": \"get_weather\",\n    \"description\": \"Get the current weather for a given location.\",\n    \"input_schema\": {\"type\": \"object\",\n        \"properties\": {\"location\": {\"type\": \"string\", \"description\": \"City and state, e.g. San Francisco, CA\"}},\n        \"required\": [\"location\"]},\n}]\nmessages = [{\"role\": \"user\", \"content\": \"What's the weather in San Francisco?\"}]\nresponse = client.messages.create(model=\"claude-opus-5-5\", max_tokens=1024, tools=tools, messages=messages)\ntool_use = next(b for b in response.content if b.type == \"tool_use\")\n\nweather = \"15 degrees Celsius, partly cloudy\"   # run your real lookup here\nmessages += [\n    {\"role\": \"assistant\", \"content\": response.content},\n    {\"role\": \"user\", \"content\": [\n        {\"type\": \"tool_result\", \"tool_use_id\": tool_use.id, \"content\": weather}\n    ]},\n]\nfollowup = client.messages.create(model=\"claude-opus-5-5\", max_tokens=1024, tools=tools, messages=messages)"
+      }
+    },
+    {
+      "heading": "is_error and error handling for client tools",
+      "notes": [
+        "Set `is_error: true` on a `tool_result` when the tool itself failed (for example a network error). Put an informative message in `content`; Claude folds it into its reply or retries.",
+        "If Claude's call is invalid (missing required parameters), you can return a `tool_result` with `is_error: true` describing the problem (for example \"Missing required 'location' parameter\"). Claude typically retries 2-3 times with corrections before apologizing. The best long-term fix is a better `description` or `strict: true`.",
+        "Server tools do not use `is_error`: when a server tool fails, the API still returns 200 and the failure appears as an error object inside the result block (for example `web_search_tool_result_error` with `error_code`). Claude handles it itself.",
+        "If you decline or skip a call (for example, a sequential batch where an earlier call failed), STILL return a `tool_result` for it with `is_error: true` and a brief explanation such as 'Not executed: the preceding write_file call failed.'",
+        "With fine-grained streaming, if accumulated tool input is invalid JSON, return an `is_error: true` result whose content wraps the raw string, for example `{\"INVALID_JSON\": \"...\"}`, built with a JSON library.",
+        "The tool runner catches exceptions thrown by your tool and automatically sends them to Claude as `is_error: true` results containing the exception message (not the full stack trace)."
+      ],
+      "examTips": [
+        "A failed tool is NOT an HTTP error to the Claude API: you still send a normal request with a `tool_result` flagged `is_error: true`.",
+        "Every `tool_use` must get a `tool_result`, even if you chose not to run it; omitting one produces a 400.",
+        "Good error content tells Claude what to try next; 'failed' alone is the anti-pattern."
+      ],
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls",
+      "example": {
+        "title": "Tool execution error result",
+        "language": "json",
+        "code": "{\n  \"role\": \"user\",\n  \"content\": [\n    {\n      \"type\": \"tool_result\",\n      \"tool_use_id\": \"toolu_01A09q90qw90lq917835lq9\",\n      \"content\": \"ConnectionError: the weather service API is not available (HTTP 500)\",\n      \"is_error\": true\n    }\n  ]\n}"
+      }
+    },
+    {
+      "heading": "Parallel tool use and result formatting",
+      "notes": [
+        "Claude 4 and later models may emit several `tool_use` blocks in one assistant turn when calls are independent. The API does not prescribe execution order: run them concurrently, sequentially, or mixed. Reads are usually safe in parallel; tools with side effects or ordering needs may be run sequentially.",
+        "Return ONE `tool_result` for each `tool_use`, ALL in a single user message, matched by `tool_use_id`, with every `tool_result` before any text.",
+        "Sending each result in a separate user message is the most common mistake: it 'teaches' Claude to stop making parallel calls.",
+        "To encourage parallel calls: tell Claude in the system prompt to invoke all relevant independent tools simultaneously (the docs give a `<use_parallel_tool_calls>` block), or phrase the user request as 'check Paris and London simultaneously'.",
+        "To disable: set `disable_parallel_tool_use: true` INSIDE the `tool_choice` object (it is not a top-level parameter). With `auto`, Claude calls at most one tool (and can still answer in text); with `any` or `tool`, it calls exactly one.",
+        "Computer use and browser use are stricter: run a batch of member calls sequentially in order and stop at the first failure, returning the documented skip text for the rest."
+      ],
+      "examTips": [
+        "Question pattern: 'Claude stopped making parallel calls after the first few turns.' Answer: results were split across user messages (or text placed before results); also strengthen the system prompt.",
+        "`disable_parallel_tool_use` lives in `tool_choice`, e.g. `{\"type\": \"auto\", \"disable_parallel_tool_use\": true}`.",
+        "Parallel calls: all results in ONE user message."
+      ],
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/parallel-tool-use",
+      "example": {
+        "title": "Correct vs wrong result layout",
+        "language": "json",
+        "code": "// Wrong: separate user messages reduce parallel tool use\n[\n  {\"role\": \"assistant\", \"content\": [tool_use_1, tool_use_2]},\n  {\"role\": \"user\", \"content\": [tool_result_1]},\n  {\"role\": \"user\", \"content\": [tool_result_2]}\n]\n\n// Correct: one user message with all results\n[\n  {\"role\": \"assistant\", \"content\": [tool_use_1, tool_use_2]},\n  {\"role\": \"user\", \"content\": [tool_result_1, tool_result_2]}\n]"
+      }
+    },
+    {
+      "heading": "Server tools: web search, web fetch, code execution",
+      "notes": [
+        "Server tools run on Anthropic's infrastructure. Claude's response contains `server_tool_use` blocks (id prefix `srvtoolu_`) followed by a result block (for example `web_search_tool_result`); you do NOT return a `tool_result` and do not handle `is_error`.",
+        "**Server-side loop and `pause_turn`:** on long turns the API may pause and return `stop_reason: \"pause_turn\"`. Continue by sending the paused assistant content back as-is with the same tools (and the container id if there is one). Cap continuations. Keep every paused response in `messages`.",
+        "**Mixed turns:** if Claude calls a server tool and one of your client tools in the same parallel group, the API returns `stop_reason: \"tool_use\"` with a `server_tool_use` that has no result yet. Reply with a user message containing ONLY the client `tool_result` blocks and the same `tools` array; adding text after results causes a 400 about an unresolved server tool.",
+        "**Web search:** versions `web_search_20250305` (basic), `web_search_20260209` (dynamic filtering), `web_search_20260318` (adds `response_inclusion`). Parameters: `max_uses`, `allowed_domains` OR `blocked_domains` (not both), `user_location`. Citations are always on; `encrypted_content` and `encrypted_index` must be passed back unmodified. Price: $10 per 1,000 searches plus tokens. Errors arrive inside a 200 response (`max_uses_exceeded`, `too_many_requests`, `unavailable`, ...).",
+        "**Web fetch:** `web_fetch_20250910` basic; `_20260209`/`_20260309`/`_20260318` add dynamic filtering (and `use_cache`, `response_inclusion`). Parameters: `max_uses`, domain filters, `citations` (optional, off by default), `max_content_tokens`, `url_sources`. No extra charge beyond tokens. It can only fetch URLs that already appeared in the conversation (user messages, client tool results, prior search/fetch results), to limit data exfiltration; it does not render JavaScript pages. Handles text, HTML and PDFs.",
+        "**Code execution:** versions `code_execution_20250825` (Bash + file ops), `code_execution_20260120` (adds REPL state persistence and programmatic tool calling), `code_execution_20260521` (same runtime, documents the 90 s per-cell limit). Sandbox: Linux container, Python 3.11, 5 GiB RAM, 5 GiB disk, 1 CPU, NO internet access. Containers can be reused by passing the container id; they expire 30 days after creation. Files go in via the Files API and a `container_upload` block. Billing: free when used with web search/fetch dynamic filtering; otherwise 1,550 free hours per org per month, then $0.05 per hour per container (5 minute minimum).",
+        "`_20260209`+ web tools default `allowed_callers` to code execution (dynamic filtering) and are NOT ZDR-eligible by default; set `allowed_callers: [\"direct\"]` to disable filtering (required on models without programmatic tool calling). Domain entries have no scheme, subdomains are included, wildcards only in the path, and non-ASCII look-alike domains are a risk."
+      ],
+      "examTips": [
+        "Server tools = no `tool_result` from you; client tools (including bash and text editor) = you execute and return `tool_result`.",
+        "`pause_turn` -> re-send assistant content unchanged and continue; `tool_use` with an unresolved `server_tool_use` -> return only client tool_results.",
+        "Code execution has no internet; web fetch cannot fetch a URL Claude invented in its own output; web search `allowed_domains` and `blocked_domains` are mutually exclusive.",
+        "Web search is billed per search; web fetch is token-only; code execution is hour-billed unless paired with search/fetch."
+      ],
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/server-tools",
+      "example": {
+        "title": "Web search tool with limits and domain filter",
+        "language": "json",
+        "code": "{\n  \"type\": \"web_search_20250305\",\n  \"name\": \"web_search\",\n  \"max_uses\": 5,\n  \"allowed_domains\": [\n    \"docs.python.org\",\n    \"example.com\"\n  ],\n  \"user_location\": {\n    \"type\": \"approximate\",\n    \"city\": \"San Francisco\",\n    \"region\": \"California\",\n    \"country\": \"US\",\n    \"timezone\": \"America/Los_Angeles\"\n  }\n}"
+      }
+    },
+    {
+      "heading": "Anthropic-schema client tools: bash, text editor, memory",
+      "notes": [
+        "These are CLIENT tools: Anthropic publishes the schema and trains Claude on it, but your application executes every call and returns a `tool_result`. They are schema-less in the request (you give `type` and `name`).",
+        "**Bash** (`bash_20250124`, name `bash`): inputs `command` (or `restart: true`). Your app keeps ONE persistent bash process so working directory, env vars and files persist between calls; the API itself is stateless. Return stdout and stderr together. Security: run in a container/VM as a least-privileged user, validate with an allowlist (not a blocklist), set resource limits and timeouts, log commands, redact secrets. Adds 325 input tokens on Claude 4.7+ models, on top of the tool-use system prompt.",
+        "**Text editor** (current version `text_editor_20250728`, name `str_replace_based_edit_tool`): commands `view` (file or directory, optional `view_range`), `str_replace` (`old_str` must match exactly), `create`, `insert` (after `insert_line`, 0 = start). `undo_edit` was removed in the Claude 4 versions. Optional `max_characters` (only on `text_editor_20250728`+) truncates large file views. Validate paths against traversal and back up files before edits.",
+        "**Memory** (`memory_20250818`, name `memory`): client-side file store under `/memories`. Commands: `view`, `create`, `str_replace`, `insert`, `delete`, `rename`. When enabled, the API injects a protocol telling Claude to view its memory directory FIRST and to assume its context may reset. Your handler must block path traversal (for example `/memories/../../secrets.env`, URL-encoded `%2e%2e%2f`), cap file sizes, and expire old files. Pairs with context editing and compaction; SDKs ship helpers (for example `BetaLocalFilesystemMemoryTool`). Memory content is stored where YOU decide, so you control retention.",
+        "For tool errors from these tools, return `is_error: true` with the message, exactly as for any client tool."
+      ],
+      "examTips": [
+        "Exam favorite: 'Who runs the bash command / memory operation?' Your application (client tool). 'Who runs code execution / web search?' Anthropic (server tool).",
+        "Memory: the primary security task is path-traversal validation; persistence is whatever backing store you implement, not Anthropic's servers.",
+        "Bash session state persists because YOUR app keeps the process alive; restart means kill and relaunch the shell."
+      ],
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/memory-tool",
+      "example": {
+        "title": "Memory tool request and a tool_use it triggers",
+        "language": "json",
+        "code": "{\n  \"request_tools\": [\n    {\n      \"type\": \"memory_20250818\",\n      \"name\": \"memory\"\n    }\n  ],\n  \"claude_first_call\": {\n    \"type\": \"tool_use\",\n    \"id\": \"toolu_01C4D5E6F7G8H9I0J1K2L3M4\",\n    \"name\": \"memory\",\n    \"input\": {\n      \"command\": \"view\",\n      \"path\": \"/memories\"\n    }\n  },\n  \"your_tool_result\": {\n    \"type\": \"tool_result\",\n    \"tool_use_id\": \"toolu_01C4D5E6F7G8H9I0J1K2L3M4\",\n    \"content\": \"Here're the files and directories up to 2 levels deep in /memories...\"\n  }\n}"
+      }
+    },
+    {
+      "heading": "Computer use",
+      "notes": [
+        "Computer use lets Claude see (screenshots) and control (mouse and keyboard) a desktop. It is a client toolset: your application executes the actions in an environment you control (for example a Docker container or VM with Xvfb) and returns results.",
+        "For Claude 5.5 and later the current declaration is a single entry `{\"type\": \"computer_toolset_20260801\"}` with no beta header; it exposes 17 member tools (screenshot, zoom, cursor_position, click variants, left_click_drag, mouse_move, scroll, type, key, hold_key, wait, ...). Older `computer_20251124` / `computer_20250124` versions (with beta headers) serve earlier models and return a 400 on Claude 5.5+. Members can be disabled through `configs`.",
+        "tool_use blocks for toolset members carry `toolset_name: \"computer\"`; your `tool_result` must echo the same `toolset_name` or it is rejected. Screenshot and zoom results must be images; other actions can return a short acknowledgement.",
+        "Batch actions: when Claude returns several calls, run them in order and stop at the first failure; return `is_error: true` for the failed action and each later one with the documented halt text.",
+        "Coordinates are in the pixel space of the screenshots you return (origin top-left). If you downscale, scale Claude's coordinates back. Good defaults are 1024x768 or 1280x720; avoid above 1920x1080. Each screenshot costs roughly 1,000-1,800 input tokens.",
+        "Security: use a dedicated VM/container with minimal privileges, keep sensitive data and credentials away from it, allowlist internet domains, require human confirmation for consequential actions (payments, accepting terms), and tell users the risks. Classifiers scan screenshots for prompt injection but precautions still apply.",
+        "Always bound the loop with a maximum iteration count; prompt Claude to take a screenshot after each step to verify (it can act as if steps succeeded). For web-only tasks the browser use tool is usually a better fit."
+      ],
+      "examTips": [
+        "Computer use is NOT run by Anthropic; you build the loop and sandbox. The key risks are prompt injection from on-screen content and runaway cost, mitigated by isolation, allowlists, human confirmation and iteration caps.",
+        "Mismatched screenshot scaling is a classic cause of mis-clicks: coordinates refer to the image you sent."
+      ],
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/computer-use-tool"
+    },
+    {
+      "heading": "Programmatic tool calling",
+      "notes": [
+        "Programmatic tool calling lets Claude write Python that calls YOUR tools as functions inside the code execution container, so loops, filtering and aggregation happen without a model round trip per call. Intermediate results stay out of Claude's context; only the code's final output reaches Claude, saving tokens and latency.",
+        "Requires the code execution tool at version `code_execution_20260120` or later, and `allowed_callers` on the tool definition: `[\"direct\"]` (default), `[\"code_execution_20260120\"]` (code only), or both. Docs recommend choosing one per tool. `allowed_callers` guides Claude but is NOT a security boundary; still handle a direct `tool_use`.",
+        "Flow: Claude emits a `server_tool_use` (code_execution) and a `tool_use` for your tool whose `caller` is `{\"type\": \"code_execution_20260120\", \"tool_id\": \"srvtoolu_...\"}`; the response has `stop_reason: tool_use` and a `container` id. You return `tool_result` blocks; the paused code resumes.",
+        "On the continuation request: the user message must contain ONLY `tool_result` blocks (no text), you MUST pass the `container` id, and you must resend the same `tools` array including code execution. Pending calls time out after about 4 minutes.",
+        "Your tools appear to the code as async Python functions taking a dict and returning a string (the `tool_result` text), so Claude can use `asyncio.gather`. Describe your tool's output format precisely (for example 'returns JSON') so Claude parses it correctly.",
+        "Docs report that adding programmatic tool calling to search tools improved BrowseComp-style research by an average of 11 percent with 24 percent fewer input tokens. Not ZDR-eligible (container data retained up to 30 days). Claude Haiku 4.5 does not support it."
+      ],
+      "examTips": [
+        "Best fit: many tool calls with large intermediate data (for example checking 20 employees' budgets): one script instead of 20 round trips.",
+        "Identify programmatic calls by the `caller` field (`direct` vs `code_execution_...`). Forgetting the container id on the continuation is rejected.",
+        "`allowed_callers` is guidance, not enforcement."
+      ],
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/programmatic-tool-calling",
+      "example": {
+        "title": "Tool definition callable only from code",
+        "language": "json",
+        "code": "{\n  \"name\": \"query_database\",\n  \"description\": \"Execute a SQL query against the database. Returns a JSON array of row objects.\",\n  \"input_schema\": {\n    \"type\": \"object\",\n    \"properties\": {\n      \"sql\": {\n        \"type\": \"string\"\n      }\n    },\n    \"required\": [\n      \"sql\"\n    ]\n  },\n  \"allowed_callers\": [\n    \"code_execution_20260120\"\n  ]\n}"
+      }
+    },
+    {
+      "heading": "Tool search, deferred loading and token overhead",
+      "notes": [
+        "Tool search lets Claude work with hundreds or thousands of tools by loading only what it needs. Problems it solves: context bloat (a multi-server setup can use around 55k tokens of definitions; search typically cuts over 85 percent) and selection accuracy that degrades past roughly 30-50 tools.",
+        "Two server-side variants: `tool_search_tool_regex_20251119` (Claude writes Python regex, max 200 chars, case-insensitive) and `tool_search_tool_bm25_20251119` (natural-language query, max 500 chars). Search covers tool names, descriptions, argument names and argument descriptions.",
+        "Mark tools `defer_loading: true`; keep the search tool and your 3-5 most-used tools non-deferred. At least one tool must be non-deferred (otherwise 400). You still send EVERY definition (including deferred) in `tools` on every request. A deferred tool cannot also carry `cache_control` (400).",
+        "Results come back as `tool_reference` blocks (up to 5 by default; Claude's `limit` can be 1-10,000), which the API expands into full definitions. Never return a `tool_result` for the `srvtoolu_` search call. Up to 10,000 deferred tools per request. Search is not metered separately; loaded definitions count as input tokens.",
+        "Custom (client-side) search is possible: return `tool_reference` blocks in the `content` of a normal `tool_result`, with each referenced tool defined in `tools` (usually deferred). For MCP connector tools set `defer_loading` in the `mcp_toolset` `default_config`.",
+        "Use tool search when you have 10+ tools, definitions over ~10k tokens, or selection accuracy dropping; skip it for fewer than 10 tools that are all used every request.",
+        "**Token overhead of tool use:** you pay input tokens for the `tools` parameter (names, descriptions, schemas), for `tool_use` and `tool_result` blocks, plus a model-specific tool-use system prompt. Examples from the table: Claude Sonnet 5.5, Opus 5.5 and Haiku 5.5 add 286 tokens for `auto`/`none`; Claude Opus 4.6/Sonnet 4.6 add 497 (589 for `any`/`tool`). With no `tools` and `tool_choice: none`, zero extra tokens. Server tools may add usage-based charges."
+      ],
+      "examTips": [
+        "Regex variant = pattern (like `get_.*_data`); BM25 variant = natural language. Memorize both type strings end with `_20251119`.",
+        "Deferring everything (including the search tool) is a 400 error. `defer_loading` changes what enters CONTEXT, not what you send.",
+        "Namespaced names (`github_`, `slack_`) help one search match a whole group."
+      ],
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool",
+      "example": {
+        "title": "Tool search with deferred tools",
+        "language": "json",
+        "code": "{\n  \"tools\": [\n    {\n      \"type\": \"tool_search_tool_regex_20251119\",\n      \"name\": \"tool_search_tool_regex\"\n    },\n    {\n      \"name\": \"get_weather\",\n      \"description\": \"Get the weather at a specific location\",\n      \"input_schema\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"location\": {\n            \"type\": \"string\"\n          }\n        },\n        \"required\": [\n          \"location\"\n        ]\n      },\n      \"defer_loading\": true\n    }\n  ]\n}"
+      }
+    },
+    {
+      "heading": "Strict tool use and fine-grained tool streaming",
+      "notes": [
+        "**Strict tool use:** set `strict: true` as a top-level property of a tool (alongside `name`, `description`, `input_schema`). It uses grammar-constrained sampling so tool `input` ALWAYS matches your schema (right types, required fields present) and the tool `name` is always valid. Example: `passengers` is always integer 2, never \"2\" or \"two\".",
+        "Use `additionalProperties: false` in the schema; strict supports a subset of JSON Schema (same grammar pipeline as structured outputs). Schemas are cached up to 24 hours; do not put PHI in schema property names, enums, consts or patterns. Computer/browser toolset entries do not accept `strict`.",
+        "Strict eliminates missing-parameter and type-mismatch errors, so you do not need validate-and-retry. It combines with `tool_choice: any` (where supported) to guarantee a call AND schema validity; on Opus 5.5/Sonnet 5.5 use `auto` + strict instead of forced choice.",
+        "**Fine-grained tool streaming:** set `eager_input_streaming: true` on a user-defined tool and use streaming. The API then sends tool input fragments as Claude generates them, WITHOUT server-side buffering or JSON validation, reducing time to first fragment of large parameters (documents, code).",
+        "Because nothing is validated, you may receive partial or invalid JSON, and a `max_tokens` stop can cut a parameter off midway. Accumulate `input_json_delta` `partial_json` fragments per content block index (the `content_block_start` input is a `{}` placeholder), parse on `content_block_stop` inside try/except, and return unparseable input as an `is_error` tool result wrapped as `{\"INVALID_JSON\": ...}`.",
+        "Without `eager_input_streaming`, standard streaming buffers and validates each parameter before sending it. The older `fine-grained-tool-streaming-2025-05-14` beta header is replaced by the per-tool field and cannot be combined with computer/browser toolset entries."
+      ],
+      "examTips": [
+        "Strict = schema-valid inputs guaranteed; fine-grained streaming = faster but possibly INVALID JSON. They solve opposite concerns; know which fits (reliability vs latency for big parameters).",
+        "Question pattern: 'Claude sometimes passes a string where your function needs an int' -> `strict: true`. 'Large file content in a tool parameter arrives slowly' -> `eager_input_streaming`."
+      ],
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/strict-tool-use",
+      "example": {
+        "title": "Strict tool definition",
+        "language": "json",
+        "code": "{\n  \"name\": \"search_flights\",\n  \"strict\": true,\n  \"input_schema\": {\n    \"type\": \"object\",\n    \"properties\": {\n      \"destination\": {\n        \"type\": \"string\"\n      },\n      \"departure_date\": {\n        \"type\": \"string\",\n        \"format\": \"date\"\n      },\n      \"passengers\": {\n        \"type\": \"integer\",\n        \"enum\": [\n          1,\n          2,\n          3,\n          4,\n          5,\n          6,\n          7,\n          8,\n          9,\n          10\n        ]\n      }\n    },\n    \"required\": [\n      \"destination\",\n      \"departure_date\"\n    ],\n    \"additionalProperties\": false\n  }\n}"
+      }
+    },
+    {
+      "heading": "Tool runner (SDK)",
+      "notes": [
+        "The tool runner (beta in the SDKs, for example `client.beta.messages.tool_runner`) runs the agentic loop for you: it executes tools when Claude calls them, sends results back, manages conversation state, and provides type safety/validation.",
+        "Define tools with SDK helpers: Python `@beta_tool` (or `@beta_async_tool`), which derives the JSON schema from type hints and the docstring; TypeScript `betaZodTool()` (Zod) or `betaTool()` (JSON Schema). Other languages use runnable-tool classes. A tool returns a string (becomes a text block) or content blocks; encode structured data as a string.",
+        "The runner is an iterable that yields each Claude message. It loops until Claude responds without a tool use or until `max_iterations` is reached. `runner.until_done()` returns just the final message. You can `break` early.",
+        "Customization: change request params with `set_messages_params()` without taking over history; call `append_messages()` (or TS `pushMessages()`) to take over history, after which YOU must append the assistant message and tool results and keep the loop able to exit (and set `max_iterations`).",
+        "Errors: if a tool raises, the runner returns the exception message to Claude as an `is_error: true` result; you can intercept errors for custom handling. Python logs the full exception via `logging`; set `ANTHROPIC_LOG=info|debug` for request detail (Python, TypeScript, Java).",
+        "Use the runner for most apps; use the manual loop when you need human-in-the-loop approval, custom logging, conditional execution, custom batching/ordering. Server-side compaction works with the runner via `context_management`."
+      ],
+      "examTips": [
+        "Runner vs manual loop: runner = least code and automatic is_error wrapping; manual = approval gates, custom control.",
+        "TypeScript Zod helper validates input; the plain JSON Schema helper (`betaTool`) does NOT validate Claude's input at runtime, so validate inside `run` if needed.",
+        "Always set `max_iterations` when you take over history to avoid an unbounded loop."
+      ],
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-runner",
+      "example": {
+        "title": "Python tool runner",
+        "language": "python",
+        "code": "import json\nfrom anthropic import Anthropic, beta_tool\n\nclient = Anthropic()\n\n@beta_tool\ndef get_weather(location: str, unit: str = \"fahrenheit\") -> str:\n    \"\"\"Get the current weather in a given location.\n\n    Args:\n        location: The city and state, e.g. San Francisco, CA\n        unit: Temperature unit, either 'celsius' or 'fahrenheit'\n    \"\"\"\n    return json.dumps({\"temperature\": \"20C\", \"condition\": \"Sunny\"})\n\nrunner = client.beta.messages.tool_runner(\n    model=\"claude-opus-5-5\",\n    max_tokens=1024,\n    tools=[get_weather],\n    messages=[{\"role\": \"user\", \"content\": \"What's the weather like in Paris?\"}],\n)\nfinal_message = runner.until_done()"
+      }
+    }
+  ],
+  "keyTakeaways": [
+    "A tool definition is name + description + input_schema (optional input_examples, strict, etc.); the description is the biggest lever on quality.",
+    "tool_choice: auto (default) / any (must use a tool) / tool (must use this one) / none; any and tool prefill the turn, skip thinking, and are rejected on Opus 5.5/Sonnet 5.5.",
+    "Client tools: stop_reason tool_use -> you run it -> user message with tool_result (tool_use_id, content, is_error).",
+    "tool_result blocks come FIRST in the user message and must immediately follow the assistant tool_use turn; text goes after.",
+    "Parallel calls: return all tool_results in ONE user message; disable with disable_parallel_tool_use inside tool_choice.",
+    "Report tool failures with is_error: true and an instructive message; every tool_use needs a tool_result.",
+    "Server tools (web search, web fetch, code execution, tool search) run on Anthropic's side: server_tool_use, srvtoolu_ ids, no tool_result; handle pause_turn by resending as-is.",
+    "Bash, text editor (str_replace_based_edit_tool), memory and computer use are client tools you execute; secure them (isolation, allowlists, path-traversal checks, iteration caps).",
+    "Programmatic tool calling needs code_execution_20260120+ and allowed_callers; Claude's code calls your tools and only final output hits context.",
+    "Tool search: defer_loading, regex or bm25 variant, at least one tool non-deferred, send all definitions every request.",
+    "strict: true guarantees schema-valid inputs; eager_input_streaming gives faster fragments but possibly invalid JSON.",
+    "Tool use costs input tokens for tools, tool_use and tool_result blocks plus a per-model tool-use system prompt (for example 286 tokens on Sonnet 5.5 for auto/none). Use the tool runner for the loop unless you need manual control."
+  ],
+  "glossary": [
+    {
+      "term": "client tool",
+      "definition": "A tool whose code runs in your application; Claude returns a tool_use block and you reply with a tool_result. Includes user-defined tools and bash, text editor, memory, computer use."
+    },
+    {
+      "term": "server tool",
+      "definition": "A tool run on Anthropic's infrastructure (web search, web fetch, code execution, tool search); appears as server_tool_use with a srvtoolu_ id and needs no tool_result."
+    },
+    {
+      "term": "tool_use block",
+      "definition": "Assistant content block with id, name and input requesting a client tool call; stop_reason is tool_use."
+    },
+    {
+      "term": "tool_result block",
+      "definition": "User content block with tool_use_id, optional content and optional is_error that answers a tool_use."
+    },
+    {
+      "term": "tool_use_id",
+      "definition": "The id of a tool_use block, echoed in the tool_result so results are matched to calls."
+    },
+    {
+      "term": "is_error",
+      "definition": "Boolean on tool_result marking that tool execution (or an invalid call) failed; the message goes in content."
+    },
+    {
+      "term": "tool_choice",
+      "definition": "Request field controlling tool use: auto, any, tool (named), none; also holds disable_parallel_tool_use."
+    },
+    {
+      "term": "disable_parallel_tool_use",
+      "definition": "Flag inside tool_choice; with auto Claude calls at most one tool, with any/tool exactly one."
+    },
+    {
+      "term": "pause_turn",
+      "definition": "Stop reason when a server-side tool loop pauses; resend the assistant content unchanged to continue."
+    },
+    {
+      "term": "input_examples",
+      "definition": "Optional array of schema-valid example inputs on a tool definition to show Claude correct usage."
+    },
+    {
+      "term": "strict tool use",
+      "definition": "strict: true on a tool; grammar-constrained sampling guarantees inputs match input_schema."
+    },
+    {
+      "term": "eager_input_streaming",
+      "definition": "Per-tool flag enabling fine-grained tool streaming without server-side JSON buffering/validation."
+    },
+    {
+      "term": "input_json_delta",
+      "definition": "Streaming delta carrying a partial_json fragment of tool input; accumulate and parse at content_block_stop."
+    },
+    {
+      "term": "allowed_callers",
+      "definition": "Tool property controlling whether a tool is called directly, from code execution, or both (programmatic tool calling)."
+    },
+    {
+      "term": "programmatic tool calling",
+      "definition": "Claude writes code in the code execution container that calls your tools, keeping intermediate results out of context."
+    },
+    {
+      "term": "defer_loading",
+      "definition": "Tool property that keeps a definition out of context until discovered via tool search."
+    },
+    {
+      "term": "tool_reference",
+      "definition": "Block returned by tool search (or a custom search tool) pointing to a tool the API then expands into its full definition."
+    },
+    {
+      "term": "tool runner",
+      "definition": "SDK helper that runs the tool-use loop automatically, with max_iterations and error wrapping."
+    },
+    {
+      "term": "memory tool",
+      "definition": "Client-side tool (memory_20250818) for file operations under /memories that persist across conversations."
+    },
+    {
+      "term": "container",
+      "definition": "The sandbox used by code execution; reusable by passing its id; expires after 30 days."
+    },
+    {
+      "term": "dynamic filtering",
+      "definition": "web_search/web_fetch _20260209+ feature where Claude filters results with code before they reach context."
+    },
+    {
+      "term": "toolset_name",
+      "definition": "Field on computer/browser use member tool_use blocks that must be echoed in the matching tool_result."
+    }
+  ],
+  "quiz": [
+    {
+      "q": "Your agent calls three independent read-only tools in one turn. After you return results, Claude stops issuing parallel calls on later turns. You send each tool_result as its own user message. What is the most likely fix?",
+      "options": [
+        "Put all tool_result blocks for that assistant turn in a single user message, results first",
+        "Set tool_choice to any",
+        "Add more input_examples to each tool",
+        "Switch the tools to strict mode"
+      ],
+      "answer": 0,
+      "explanation": "Splitting results across multiple user messages is the documented cause of lost parallelism. All results for one assistant turn belong in one user message with tool_result blocks before any text. tool_choice any, input_examples and strict do not address result formatting.",
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/parallel-tool-use"
+    },
+    {
+      "q": "A tool_result user message is built as [text 'Here are the results:', tool_result]. What happens?",
+      "options": [
+        "Claude ignores the text block",
+        "The request fails with a 400 because tool_result blocks must come first",
+        "The text is automatically moved after the result",
+        "It works but disables parallel tool use"
+      ],
+      "answer": 1,
+      "explanation": "Text before tool_result blocks causes a 400. tool_result blocks must come first and any text after them. The API does not reorder content.",
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls"
+    },
+    {
+      "q": "Your get_order tool throws a database timeout. What is the correct way to tell Claude?",
+      "options": [
+        "Return an HTTP 500 to the Claude API",
+        "Skip the tool_result so Claude retries on its own",
+        "Send a tool_result with is_error true and a message saying what failed and what to try next",
+        "Send an assistant message containing the error"
+      ],
+      "answer": 2,
+      "explanation": "Execution failures are reported in a tool_result with is_error: true and an instructive message. Omitting the result causes a 400, and errors do not belong in assistant messages or API HTTP failures.",
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls"
+    },
+    {
+      "q": "A developer sets tool_choice {type: tool, name: get_weather} and also asks Claude to explain its reasoning in text before the call, but no text appears. Why?",
+      "options": [
+        "The model ignores system prompts when tools are defined",
+        "tool_choice any or tool prefills the assistant turn, so no natural-language text precedes the tool_use block",
+        "Explanations require extended thinking",
+        "The tool name was invalid"
+      ],
+      "answer": 1,
+      "explanation": "With any or tool, the API prefills the assistant message to force a tool call, so no preamble text is emitted. Use auto and instruct the model in the user message if you want explanation plus a call.",
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools"
+    },
+    {
+      "q": "You need guaranteed schema-valid tool inputs on Claude Sonnet 5.5, which rejects forced tool_choice (any/tool). What should you use?",
+      "options": [
+        "tool_choice any plus strict",
+        "tool_choice auto with strict: true on the tool definitions",
+        "Disable parallel tool use",
+        "Add more detail to the description only"
+      ],
+      "answer": 1,
+      "explanation": "On Sonnet 5.5 and Opus 5.5, any and tool return a 400. Use auto with strict tool use to guarantee schema-valid inputs; prompting still influences which tool is chosen.",
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools"
+    },
+    {
+      "q": "In a request you include web_search and your own client tool run_command. Claude calls both in parallel and the response ends with stop_reason tool_use, with a server_tool_use block lacking a result. What should your next user message contain?",
+      "options": [
+        "A tool_result for the srvtoolu_ id and the client tool",
+        "Only the client tool_result blocks, with the same tools array",
+        "A text block asking Claude to continue",
+        "Nothing; resend the same request"
+      ],
+      "answer": 1,
+      "explanation": "The API defers the server tool until you return the client results. Send a user message containing only the client tool_result blocks and keep the same tools. Never return a result for a srvtoolu_ id, and adding text after the results causes a 400.",
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/server-tools"
+    },
+    {
+      "q": "A long web search turn returns stop_reason pause_turn. How do you continue?",
+      "options": [
+        "Start a new conversation",
+        "Send the paused assistant content back unchanged with the same tools and continue, capping the number of continuations",
+        "Add a user message saying 'continue' before the assistant content",
+        "Set max_uses to 0"
+      ],
+      "answer": 1,
+      "explanation": "pause_turn means the server-side loop paused. Re-send the assistant content as-is (same tools, container id if any) so Claude continues; repeat as needed with a cap.",
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/server-tools"
+    },
+    {
+      "q": "Which statement about web fetch is correct?",
+      "options": [
+        "It can fetch any URL Claude writes in its own output",
+        "It can only fetch URLs that already appeared in the conversation, such as user messages or earlier tool results",
+        "It renders JavaScript-heavy pages",
+        "It is billed $10 per 1,000 fetches"
+      ],
+      "answer": 1,
+      "explanation": "To reduce data exfiltration risk, web fetch only allows URLs already present in the conversation context. It does not render JavaScript pages and has no additional charge beyond tokens ($10 per 1,000 is web search pricing).",
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-fetch-tool"
+    },
+    {
+      "q": "You must analyze a CSV in a sandbox with no internet, reusing the same files across several requests. Which design fits?",
+      "options": [
+        "Client bash tool run on Anthropic servers",
+        "Code execution server tool, uploading via the Files API and passing the container id back on later requests",
+        "Web fetch with the CSV URL",
+        "Memory tool"
+      ],
+      "answer": 1,
+      "explanation": "Code execution runs in an Anthropic-hosted container with no internet. Files come in via the Files API and a container_upload block, and passing the container id reuses state (containers last up to 30 days). Bash and memory are client tools; web fetch is for URLs.",
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/code-execution-tool"
+    },
+    {
+      "q": "Your Claude agent has a bash tool. Which implementation detail is YOUR responsibility?",
+      "options": [
+        "Running the shell process and keeping it alive across calls, with isolation and timeouts",
+        "Providing an input_schema",
+        "Executing the command on Anthropic's infrastructure",
+        "Setting the beta header computer-use for bash"
+      ],
+      "answer": 0,
+      "explanation": "Bash is a client tool: your app owns the persistent shell, timeouts and safety checks. The tool is schema-less (no input_schema you provide), and it does not run server-side.",
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/bash-tool"
+    },
+    {
+      "q": "A memory tool handler receives path '/memories/../../etc/secrets.env'. What should it do?",
+      "options": [
+        "Allow it; Claude is trusted",
+        "Reject it: validate paths resolve inside /memories and block traversal patterns, including URL-encoded ones",
+        "Create a symlink",
+        "Return is_error false with empty content"
+      ],
+      "answer": 1,
+      "explanation": "The memory tool is client-side and your handler must prevent path traversal by canonicalizing and verifying every path stays within /memories.",
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/memory-tool"
+    },
+    {
+      "q": "An analyst agent must query a database 20 times, filter large results, and report only exceptions, minimizing round trips and context size. Which feature fits best?",
+      "options": [
+        "Fine-grained tool streaming",
+        "Programmatic tool calling with allowed_callers set to code execution",
+        "tool_choice any",
+        "Increasing max_tokens"
+      ],
+      "answer": 1,
+      "explanation": "Programmatic tool calling lets Claude write code that loops over your tool inside the code execution container; intermediate results stay out of context. It requires code_execution_20260120 or later.",
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/programmatic-tool-calling"
+    },
+    {
+      "q": "You have 150 tools across several MCP servers and selection accuracy is dropping while definitions consume tens of thousands of tokens. What is the right configuration?",
+      "options": [
+        "Set defer_loading true on every tool including the search tool",
+        "Include a tool search tool, mark most tools defer_loading true, keep the search tool and a few frequent tools non-deferred, and still send all definitions",
+        "Remove descriptions to save tokens",
+        "Use tool_choice none"
+      ],
+      "answer": 1,
+      "explanation": "Tool search loads tools on demand. At least one tool must be non-deferred, you still send every definition in tools, and keeping the 3-5 most-used tools loaded avoids needless searches. Deferring everything is a 400.",
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool"
+    },
+    {
+      "q": "Large generated documents are passed as a tool parameter and arrive slowly, but occasionally your parser sees invalid JSON when using eager_input_streaming. What is the correct handling?",
+      "options": [
+        "Enable strict mode to prevent invalid JSON during streaming",
+        "Accumulate partial_json fragments, parse in a guarded block, and return invalid input as an is_error tool result",
+        "Disable streaming permanently",
+        "Ignore the tool call"
+      ],
+      "answer": 1,
+      "explanation": "Fine-grained streaming skips server-side buffering and validation, so invalid or truncated JSON (for example on max_tokens) is possible. Guard the parse and report with is_error true, for example wrapping the raw text under INVALID_JSON.",
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/fine-grained-tool-streaming"
+    }
+  ]
+}

@@ -1,0 +1,468 @@
+{
+  "slug": "config-management",
+  "title": "Config Management",
+  "overview": "Claude Code is configured through layered files: settings.json in several scopes, CLAUDE.md memory files, permission rules, environment variables, model settings, MCP server definitions and organization-managed policy. The exam tests whether you know which file or scope a setting belongs in, which value wins when scopes disagree, and which controls an administrator can truly enforce versus merely suggest.",
+  "sources": [
+    {"title": "Settings files and precedence", "url": "https://code.claude.com/docs/en/settings"},
+    {"title": "How Claude remembers your project (CLAUDE.md and memory)", "url": "https://code.claude.com/docs/en/memory"},
+    {"title": "Configure permissions", "url": "https://code.claude.com/docs/en/permissions"},
+    {"title": "Environment variables", "url": "https://code.claude.com/docs/en/env-vars"},
+    {"title": "Model configuration", "url": "https://code.claude.com/docs/en/model-config"},
+    {"title": "Connect Claude Code to tools via MCP", "url": "https://code.claude.com/docs/en/mcp"},
+    {"title": "Explore the .claude directory", "url": "https://code.claude.com/docs/en/claude-directory"},
+    {"title": "Deploy managed settings", "url": "https://code.claude.com/docs/en/managed-settings"},
+    {"title": "Control MCP server access for your organization", "url": "https://code.claude.com/docs/en/managed-mcp"}
+  ],
+  "sections": [
+    {
+      "heading": "Settings files and their scopes",
+      "notes": [
+        "Claude Code reads settings from four sources: **user** (`~/.claude/settings.json`, you in every project), **shared project** (`.claude/settings.json`, committed so the team shares it), **project local** (`.claude/settings.local.json`, you in one project, kept out of git) and **managed** (`managed-settings.json`, MDM policy or server-managed settings, whole organization).",
+        "Settings files are strict JSON: comments and trailing commas are errors. A `$schema` line pointing at the published schema gives editor validation.",
+        "Claude Code also keeps `~/.claude.json` for itself: account details, MCP server configs (user and local scope), per-project trust decisions and global config keys that `/config` writes. You normally do not edit it.",
+        "`/config` writes most options to `~/.claude/settings.json`; a few (such as Show tips) go to `.claude/settings.local.json`. The 'Yes, and don't ask again' answer on a Bash prompt saves an allow rule to `.claude/settings.local.json` at the git repository root.",
+        "Files are watched and most edits (permissions, hooks) apply to a running session without a restart. `/status` shows which setting sources loaded; `claude doctor` lists rejected entries.",
+        "`CLAUDE_CONFIG_DIR` relocates the home-directory config (settings, history, plugins, credentials), which is how you keep separate work and personal accounts."
+      ],
+      "example": {
+        "title": "A user settings file with permissions and a schema",
+        "language": "json",
+        "code": "{\n  \"$schema\": \"https://json.schemastore.org/claude-code-settings.json\",\n  \"permissions\": {\n    \"allow\": [\n      \"Bash(npm run lint)\",\n      \"Bash(npm run test *)\"\n    ],\n    \"deny\": [\n      \"Read(./.env)\",\n      \"Read(./.env.*)\"\n    ]\n  }\n}"
+      },
+      "examTips": [
+        "Personal-but-project-specific override: `.claude/settings.local.json`. Team-wide: `.claude/settings.json` committed. All projects for me: `~/.claude/settings.json`.",
+        "Managed settings are delivered by IT; a developer cannot create or override them.",
+        "Do not confuse MCP 'local scope' (stored in `~/.claude.json`) with `.claude/settings.local.json`."
+      ],
+      "source": "https://code.claude.com/docs/en/settings"
+    },
+    {
+      "heading": "Settings precedence and merging",
+      "notes": [
+        "When the same key appears in several places the highest level wins. Order, highest first: **managed**, **command line** (`--settings`), **project local**, **shared project**, **user**.",
+        "Array keys such as `permissions.allow` do not override; they **merge** across files so each scope can add entries. Exceptions with their own rules: `fallbackModel` (whole value from highest file), `modelPicker`, `availableModels` when managed defines it, and `modelSettings`.",
+        "`--settings <file-or-json>` applies for one session above user/project/local files but below managed settings.",
+        "Environment variables are not a level in the stack. Per pair of variable and key the docs say which wins, e.g. `ANTHROPIC_MODEL` beats the `model` key from any file.",
+        "A few security-sensitive keys honor a restrictive value from a lower scope even over managed settings, for example `disableClaudeAiConnectors: true` and `permissions.blockReadsOutsideWorkingDirectories: true` from any scope.",
+        "Some values cannot come from a repository file: `permissions.defaultMode` set to `auto` or `bypassPermissions` has no effect from project or local settings (use user, managed or `--permission-mode`). Committed `permissions.allow` rules and `additionalDirectories` wait until the folder is trusted; `deny` and `ask` rules apply immediately."
+      ],
+      "example": {
+        "title": "Overriding a team setting for yourself only",
+        "language": "bash",
+        "code": "# Team's committed .claude/settings.json sets a model; override it just for you:\n# .claude/settings.local.json\n#   { \"model\": \"opus\" }\n\n# One-off session override, nothing written to disk:\nclaude --settings '{\"model\": \"opus\"}'"
+      },
+      "examTips": [
+        "Local beats shared project beats user. Managed beats everything (and `--settings`).",
+        "Lists merge, scalars override. A project `allow` list does not erase the user's `allow` list.",
+        "A deny at any scope beats an allow at any scope."
+      ],
+      "source": "https://code.claude.com/docs/en/settings"
+    },
+    {
+      "heading": "CLAUDE.md hierarchy, imports and rules",
+      "notes": [
+        "CLAUDE.md files give persistent instructions. Locations: **managed policy** (`/Library/Application Support/ClaudeCode/CLAUDE.md` on macOS, `/etc/claude-code/CLAUDE.md` on Linux and WSL, `C:\\Program Files\\ClaudeCode\\CLAUDE.md` on Windows), **user** (`~/.claude/CLAUDE.md`), **project** (`./CLAUDE.md` or `./.claude/CLAUDE.md`) and **local** (`./CLAUDE.local.md`, gitignored).",
+        "Files in the working directory and every directory above it load at launch and are **concatenated**, not overridden, ordered from the filesystem root down so the closest file is read last. `CLAUDE.local.md` is appended after `CLAUDE.md` at each level.",
+        "CLAUDE.md files in subdirectories below the working directory load on demand, when Claude reads or edits a file there.",
+        "Imports use `@path/to/file`. Relative paths resolve from the importing file; imports can nest to a maximum depth of four hops. Imports inside code spans or fenced code blocks are not expanded. Imports outside the working directory trigger a one-time approval dialog in project files.",
+        "`.claude/rules/*.md` holds topic files. Rules without frontmatter load at launch; a rule with `paths:` frontmatter (glob list) loads only when Claude touches a matching file. `paths` is the only frontmatter field read.",
+        "Block-level HTML comments are stripped before injection. Aim for under 200 lines per file; CLAUDE.md is context, not enforcement. To guarantee a behavior use a hook or permission rule.",
+        "`--add-dir` directories do not load their CLAUDE.md unless `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`. `claudeMdExcludes` skips unwanted CLAUDE.md files in monorepos. `/init` generates a starting file; `/memory` edits memory files.",
+        "Auto memory is separate: notes Claude writes itself under `~/.claude/projects/<project>/memory/`, with the first 200 lines or 25KB loaded each session."
+      ],
+      "example": {
+        "title": "CLAUDE.md with imports and a path-scoped rule",
+        "language": "text",
+        "code": "# CLAUDE.md\nSee @README for project overview and @package.json for npm commands.\n\n# Additional Instructions\n- git workflow @docs/git-instructions.md\n- personal prefs @~/.claude/my-project-instructions.md\n\n# .claude/rules/api.md\n---\npaths:\n  - \"src/api/**/*.ts\"\n---\n- All endpoints must validate input"
+      },
+      "examTips": [
+        "CLAUDE.md files concatenate; they do not override each other. Contradictions are resolved by the model, not by precedence.",
+        "Imports have a max depth of four hops; wrapping a path in backticks keeps it literal.",
+        "Instructions that must always be enforced belong in hooks or permissions, not CLAUDE.md."
+      ],
+      "source": "https://code.claude.com/docs/en/memory"
+    },
+    {
+      "heading": "Permission rules: allow, ask, deny",
+      "notes": [
+        "Rules are written `Tool` or `Tool(specifier)` under `permissions.allow`, `permissions.ask` and `permissions.deny`.",
+        "Evaluation order is **deny, then ask, then allow**; the first match decides and specificity does not matter. A broad deny such as `Bash(aws *)` beats a narrower allow like `Bash(aws s3 ls)`. A matching ask rule prompts even when a more specific allow exists.",
+        "The same holds across scopes: a user-level deny beats a project-level allow and vice versa. A managed deny cannot be overridden by `--allowedTools`.",
+        "Bash rules use wildcards (`Bash(npm run test *)`). Compound commands are split into subcommands and each is checked; deny and ask match if any subcommand matches. Bash rules are not a security boundary against every way of invoking a program.",
+        "Read and Edit rules use gitignore-style patterns: `//path` absolute from filesystem root, `~/path` from home, `/path` relative to the primary working directory (or the settings location for some rules), `path` or `./path` relative to the current directory.",
+        "WebFetch uses `WebFetch(domain:example.com)`. MCP uses `mcp__server` or `mcp__server__*` for all tools of a server, or `mcp__server__tool` for one tool. Agent rules control subagents.",
+        "Hooks do not bypass rules: a PreToolUse hook returning allow cannot override a deny or ask rule, but a hook that blocks (exit code 2) stops the call before allow rules matter.",
+        "`additionalDirectories` and `--add-dir` extend file access, not configuration: most `.claude/` config is not discovered from added directories."
+      ],
+      "example": {
+        "title": "Layered permission rules",
+        "language": "json",
+        "code": "{\n  \"permissions\": {\n    \"allow\": [\"Bash(npm run test *)\", \"WebFetch(domain:docs.python.org)\"],\n    \"ask\":   [\"Bash(git push *)\"],\n    \"deny\":  [\"Read(./secrets/**)\", \"Read(//Users/alice/.ssh/**)\", \"mcp__puppeteer__*\"]\n  }\n}"
+      },
+      "examTips": [
+        "Order is deny > ask > allow regardless of which file the rule lives in.",
+        "`Read(/secrets/**)` in user settings is NOT absolute; use `//` for a true absolute path or `~/` for home.",
+        "Allow rules in committed project settings are not applied until the user trusts the folder."
+      ],
+      "source": "https://code.claude.com/docs/en/permissions"
+    },
+    {
+      "heading": "Permission modes",
+      "notes": [
+        "`default` (shown as Manual) prompts on first use of each tool. `acceptEdits` auto-accepts file edits and common filesystem commands (`mkdir`, `touch`, `mv`, `cp`) within the working directory or additional directories.",
+        "`plan` lets Claude read and explore without editing source files. `auto` runs without routine prompts while a background classifier checks actions against your request.",
+        "`dontAsk` auto-denies anything that would prompt; only pre-approved tools (via `permissions.allow` or `/permissions`) and no-approval actions run.",
+        "`bypassPermissions` skips prompts, except actions no mode auto-approves. Use it only in isolated containers or VMs.",
+        "Set the starting mode with `permissions.defaultMode` or `--permission-mode`. `permissions.disableBypassPermissionsMode` and `permissions.disableAutoMode` set to `\"disable\"` remove those modes; they are most useful in managed settings.",
+        "`permissions.blockReadsOutsideWorkingDirectories` / `blockWritesOutsideWorkingDirectories` make file tools refuse paths outside the working directories in every mode."
+      ],
+      "example": {
+        "title": "Choosing a mode",
+        "language": "bash",
+        "code": "claude --permission-mode plan          # explore without editing\nclaude --permission-mode acceptEdits   # fast iteration on edits\n\n# settings.json (user or managed)\n{ \"permissions\": { \"defaultMode\": \"acceptEdits\", \"disableBypassPermissionsMode\": \"disable\" } }"
+      },
+      "examTips": [
+        "dontAsk is the strict allowlist mode (deny anything not pre-approved); bypassPermissions is the opposite extreme.",
+        "defaultMode `auto` or `bypassPermissions` from a project or local file is ignored."
+      ],
+      "source": "https://code.claude.com/docs/en/permissions"
+    },
+    {
+      "heading": "Environment variables",
+      "notes": [
+        "Set variables in the shell (`export NAME=value`) or in the `env` block of any settings file, which applies every time `claude` runs and can be scoped to user, project, local or managed. `env` values are copied literally: `~` and `$HOME` are not expanded.",
+        "When a shell variable and an `env` entry set the same name, the settings value generally applies; a stale variable can be neutralized by setting it to an empty string (for example `\"CLAUDE_CODE_USE_VERTEX\": \"\"`).",
+        "Boolean variables accept `1/true/yes/on` and `0/false/no/off`. Presence-only variables such as `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, `DISABLE_TELEMETRY` and `DISABLE_ERROR_REPORTING` turn on for any non-empty value, even `0`.",
+        "Examples: `ANTHROPIC_API_KEY` (used instead of subscription login when approved), `BASH_DEFAULT_TIMEOUT_MS` (default 120000), `API_TIMEOUT_MS`, `MAX_THINKING_TOKENS`, `CLAUDE_CONFIG_DIR`, `MCP_TIMEOUT`, `MAX_MCP_OUTPUT_TOKENS`, `CLAUDE_CODE_USE_BEDROCK` / `_VERTEX` / `_FOUNDRY` for cloud providers.",
+        "Authentication order: cloud-provider variables, then `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `apiKeyHelper`, `CLAUDE_CODE_OAUTH_TOKEN`, then profiles and `/login` subscription credentials. Unset `ANTHROPIC_API_KEY` to fall back to a subscription.",
+        "Some variables are ignored when set in project or local `env` blocks for safety, including `CLAUDE_CONFIG_DIR` and OpenTelemetry exporter variables."
+      ],
+      "example": {
+        "title": "env block in settings",
+        "language": "json",
+        "code": "{\n  \"env\": {\n    \"API_TIMEOUT_MS\": \"1200000\",\n    \"BASH_DEFAULT_TIMEOUT_MS\": \"300000\",\n    \"CLAUDE_CONFIG_DIR\": \"/home/you/.claude-work\"\n  }\n}"
+      },
+      "examTips": [
+        "`DISABLE_TELEMETRY=0` still disables telemetry: these are presence-based.",
+        "A project-committed env block cannot redirect telemetry export or `CLAUDE_CONFIG_DIR`."
+      ],
+      "source": "https://code.claude.com/docs/en/env-vars"
+    },
+    {
+      "heading": "Model configuration",
+      "notes": [
+        "Aliases: `default` (clears override), `best`, `fable`, `sonnet`, `opus`, `haiku`, `sonnet[1m]`, `opus[1m]` and `opusplan` (Opus in plan mode, Sonnet for execution). Aliases track the newest version; pin a version with a full model name or the matching `ANTHROPIC_DEFAULT_*_MODEL` variable.",
+        "Priority for choosing the model, highest first: `/model` in session, `--model` at startup, `ANTHROPIC_MODEL`, the `model` settings key, then `ANTHROPIC_DEFAULT_MODEL` for new sessions.",
+        "`ANTHROPIC_DEFAULT_OPUS_MODEL`, `_SONNET_MODEL`, `_HAIKU_MODEL`, `_FABLE_MODEL` control what each alias resolves to; this is how you pin versions on Bedrock, Vertex or Foundry.",
+        "Administrators restrict choices with `availableModels` (family, version prefix or full ID) plus `enforceAvailableModels` and `deniedModels`. A managed `model` is only a starting default; the locks are `availableModels` and `deniedModels`.",
+        "Effort levels (`low` to `max`) resolve in this order: `CLAUDE_CODE_EFFORT_LEVEL`, in-session pick, `--effort`, saved settings, then model default. `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` removes `[1m]` variants.",
+        "In the `/model` picker Enter saves a default, while `s` switches for the session only. Each model has its own prompt cache, so switching mid-session re-reads the conversation uncached."
+      ],
+      "example": {
+        "title": "Pinning and restricting models",
+        "language": "json",
+        "code": "{\n  \"model\": \"claude-sonnet-4-5\",\n  \"availableModels\": [\"claude-sonnet-4-5\", \"haiku\"],\n  \"enforceAvailableModels\": true,\n  \"env\": { \"ANTHROPIC_DEFAULT_SONNET_MODEL\": \"claude-sonnet-4-5\" }\n}"
+      },
+      "examTips": [
+        "`ANTHROPIC_MODEL` outranks the `model` key; `--model` and `/model` outrank `ANTHROPIC_MODEL`.",
+        "To prevent users from picking a model, use managed `availableModels`, not a managed `model` value.",
+        "Aliases drift to newer models over time; pin with full names for reproducibility."
+      ],
+      "source": "https://code.claude.com/docs/en/model-config"
+    },
+    {
+      "heading": "MCP scopes and .mcp.json",
+      "notes": [
+        "Three scopes: **local** (default; this project only, private, stored in `~/.claude.json`), **project** (shared via `.mcp.json` in the project root, committed) and **user** (all your projects, private, `~/.claude.json`). Choose with `--scope local|project|user`.",
+        "Precedence for the same server name: local, then project, then user, then plugin servers, then claude.ai connectors. Claude Code connects once using the highest source; entries are not merged field by field. A `managedMcpServers` entry from managed settings ranks above all of them.",
+        "`.mcp.json` has a top-level `mcpServers` object. `${VAR}` and `${VAR:-default}` expansion works in `command`, `args`, `env`, `url` and `headers`. An unset variable without default leaves the literal text and warns.",
+        "Transports: `http` (recommended), `sse` (deprecated), `stdio` (local process, command after `--`), and `ws` via `add-json`. Commands: `claude mcp add`, `add-json`, `list`, `get`, `remove`, `reset-project-choices`.",
+        "Interactive sessions ask for approval before using servers from `.mcp.json`. Settings keys `enableAllProjectMcpServers`, `enabledMcpjsonServers` and `disabledMcpjsonServers` pre-answer this; the enable keys committed in a repo are ignored until the folder is trusted.",
+        "Limits: MCP output warns above 10,000 tokens and caps at 25,000 by default (`MAX_MCP_OUTPUT_TOKENS`); `MCP_TIMEOUT` sets server startup timeout; `MCP_TOOL_TIMEOUT` or per-server `timeout` sets tool timeouts."
+      ],
+      "example": {
+        "title": ".mcp.json with env expansion",
+        "language": "json",
+        "code": "{\n  \"mcpServers\": {\n    \"api-server\": {\n      \"type\": \"http\",\n      \"url\": \"${API_BASE_URL:-https://api.example.com}/mcp\",\n      \"headers\": { \"Authorization\": \"Bearer ${API_KEY}\" }\n    }\n  }\n}"
+      },
+      "examTips": [
+        "Share an MCP server with the team: `--scope project` (writes `.mcp.json`). Keep it private across projects: `--scope user`.",
+        "Never hardcode secrets in `.mcp.json`; use `${VAR}` expansion.",
+        "A `url` entry with no `type` is read as stdio and rejected."
+      ],
+      "source": "https://code.claude.com/docs/en/mcp"
+    },
+    {
+      "heading": ".claude directory layout",
+      "notes": [
+        "Project (committed) layout: `CLAUDE.md` (or `.claude/CLAUDE.md`), `.claude/settings.json`, `.claude/settings.local.json` (not committed), `.claude/rules/*.md`, `.claude/skills/<name>/SKILL.md`, `.claude/commands/*.md`, `.claude/agents/*.md`, `.claude/output-styles/*.md`, `.claude/agent-memory/`, plus `.mcp.json` at the project root.",
+        "Global (`~/.claude/`) mirrors much of this for personal use: `CLAUDE.md`, `settings.json`, `rules/`, `skills/`, `commands/`, `agents/`, `output-styles/`, `keybindings.json`, `themes/`. Only settings.local.json and `.mcp.json` are project-only.",
+        "`~/.claude.json` (global only) holds app state, account info and personal MCP servers. `~/.claude/projects/<project>/` holds transcripts and auto-memory.",
+        "Application data: transcripts, history, file snapshots and debug logs live in `~/.claude`. Transcripts and similar paths are deleted after `cleanupPeriodDays` (default 30, minimum 1). They are plaintext, so deny reads of credential files and consider shorter retention.",
+        "Skills, commands, subagents, output styles and rules read configuration from YAML frontmatter; for a rule, `paths` is the only field."
+      ],
+      "example": {
+        "title": "Typical project tree",
+        "language": "text",
+        "code": "my-project/\n├── CLAUDE.md\n├── CLAUDE.local.md          # gitignored\n├── .mcp.json                # team MCP servers\n└── .claude/\n    ├── settings.json        # committed\n    ├── settings.local.json  # personal, not committed\n    ├── rules/testing.md\n    ├── skills/deploy/SKILL.md\n    └── agents/reviewer.md"
+      },
+      "examTips": [
+        "`.mcp.json` lives at the project root, not inside `.claude/`.",
+        "`claude purge` removes per-project state; the retention sweep removes old transcripts, not auto memory."
+      ],
+      "source": "https://code.claude.com/docs/en/claude-directory"
+    },
+    {
+      "heading": "Enterprise managed settings",
+      "notes": [
+        "Managed settings sit at the top of precedence: nothing in user, project, local or `--settings` overrides them, apart from the narrow restrictive-value exceptions.",
+        "Delivery mechanisms: **server-managed settings** (claude.ai admin console or gateway; fetched at startup and hourly), **MDM or OS policy** (macOS profile in the `com.anthropic.claudecode` domain, Windows `HKLM\\SOFTWARE\\Policies\\ClaudeCode` `Settings` value), **file-based** `managed-settings.json` and a `managed-settings.d/` drop-in directory, and an HKCU registry fallback on Windows.",
+        "File locations: macOS `/Library/Application Support/ClaudeCode/`, Linux and WSL `/etc/claude-code/`, Windows `C:\\Program Files\\ClaudeCode\\`. `/status` shows `Enterprise managed settings (file)` when loaded.",
+        "By default (`managedSourcesBehavior: \"first-wins\"`) Claude Code uses only the highest-ranked managed source that delivers a policy key: remote first, then MDM, then files, and ignores the rest. Setting `\"merge\"` applies every admin source. Within `managed-settings.d/`, files merge alphabetically after `managed-settings.json`: later scalars win, lists union, objects merge by key.",
+        "Common enforcement keys: `allowManagedPermissionRulesOnly`, `permissions.disableBypassPermissionsMode`, `availableModels`, `forceLoginMethod`, `forceLoginOrgUUID`, `allowedProviders`, `allowManagedMcpServersOnly`, `strictKnownMarketplaces`.",
+        "Server-managed settings reach cloud sessions, but a device's MDM profile or managed file does not. Cloud sessions in Anthropic-hosted environments get policy only from server-managed settings.",
+        "Managed MCP: `managed-mcp.json` (same system directories) gives exclusive control; `managedMcpServers` provides servers alongside users' own; `allowedMcpServers` and `deniedMcpServers` filter. Deny always wins; without `allowManagedMcpServersOnly` users can broaden allowlists in their own settings."
+      ],
+      "example": {
+        "title": "Minimal managed-settings.json",
+        "language": "json",
+        "code": "{\n  \"permissions\": {\n    \"deny\": [\"Read(./.env)\", \"Read(./secrets/**)\"],\n    \"disableBypassPermissionsMode\": \"disable\"\n  },\n  \"allowManagedPermissionRulesOnly\": true,\n  \"allowManagedMcpServersOnly\": true,\n  \"allowedMcpServers\": [{ \"serverUrl\": \"https://api.githubcopilot.com/*\" }]\n}"
+      },
+      "examTips": [
+        "Allow rules still merge across scopes unless `allowManagedPermissionRulesOnly` is set.",
+        "`allowManagedMcpServersOnly` is separate from `allowManagedPermissionRulesOnly`; one does not enforce the other.",
+        "A `serverName` entry is a label, not a security control; enforce with `serverUrl` or `serverCommand`.",
+        "`managed-mcp.json` cannot be delivered through server-managed settings; use `managedMcpServers` for that."
+      ],
+      "source": "https://code.claude.com/docs/en/managed-settings"
+    },
+    {
+      "heading": "Managed MCP control in detail",
+      "notes": [
+        "Patterns: disable MCP (empty `mcpServers` in `managed-mcp.json`), fixed deployment, provided servers (`managedMcpServers`), approved catalog (`allowedMcpServers` plus `allowManagedMcpServersOnly: true`), soft allowlist, denylist only.",
+        "Evaluation order: merge lists, check denylist (any match blocks; nothing overrides it), then check allowlist. Unset allowlist allows all; an empty array allows none (except built-in or organization-provided servers that skip the check).",
+        "Once an allowlist has any `serverUrl` entry, remote servers must match a URL; once it has any `serverCommand` entry, stdio servers must match the exact command and args array. `serverName` only counts when no stricter entries of that type exist.",
+        "`managedMcpServers` entries must be `http` or `sse` with an `https://` URL, with no `command`, `args`, `env` or `${VAR}` references.",
+        "With `managed-mcp.json` deployed, `claude mcp add` fails and `--mcp-config` or `--strict-mcp-config` makes Claude Code exit; claude.ai connectors are suppressed unless `allowAllClaudeAiMcps: true` is set in a managed source."
+      ],
+      "example": {
+        "title": "Approved catalog with a denylist",
+        "language": "json",
+        "code": "{\n  \"allowManagedMcpServersOnly\": true,\n  \"allowedMcpServers\": [\n    { \"serverUrl\": \"https://*.internal.example.com/*\" },\n    { \"serverCommand\": [\"python\", \"/usr/local/bin/approved-server.py\"] }\n  ],\n  \"deniedMcpServers\": [\n    { \"serverUrl\": \"https://*.untrusted.example.com/*\" }\n  ]\n}"
+      },
+      "examTips": [
+        "Denylist beats allowlist; denylists merge from every scope even under the managed-only lock.",
+        "A URL pattern with no port matches only the default port when the hostname has no wildcard."
+      ],
+      "source": "https://code.claude.com/docs/en/managed-mcp"
+    }
+  ],
+  "keyTakeaways": [
+    "Settings precedence, highest first: managed, command line (`--settings`), project local, shared project, user.",
+    "Array settings such as `permissions.allow` merge across scopes; scalar settings are overridden by the higher scope.",
+    "Permission rules evaluate deny, then ask, then allow, across all scopes; a deny can never be overridden by an allow.",
+    "CLAUDE.md files concatenate from the filesystem root down to the working directory; they are guidance, not enforcement.",
+    "CLAUDE.md `@path` imports nest up to four hops; path-scoped rules in `.claude/rules/` use `paths:` frontmatter.",
+    "Permission modes: default, acceptEdits, plan, auto, dontAsk, bypassPermissions; bypass and auto can be disabled via `disableBypassPermissionsMode` / `disableAutoMode`.",
+    "Model priority: `/model`, then `--model`, then `ANTHROPIC_MODEL`, then settings `model`, then `ANTHROPIC_DEFAULT_MODEL`.",
+    "MCP scopes are local (default, in `~/.claude.json`), project (`.mcp.json`, committed) and user; precedence is local, project, user.",
+    "`.mcp.json` supports `${VAR}` and `${VAR:-default}` expansion; use it instead of hardcoding secrets.",
+    "Managed settings come from server-managed settings, MDM/registry, or `managed-settings.json` (plus `managed-settings.d/`); by default only the highest-ranked source applies.",
+    "`managed-mcp.json` gives exclusive MCP control; `allowedMcpServers` plus `allowManagedMcpServersOnly` makes the allowlist authoritative; denylist always wins.",
+    "`.claude/settings.local.json` and `CLAUDE.local.md` are personal, project-specific and should stay out of git."
+  ],
+  "glossary": [
+    {"term": "Managed settings", "definition": "Organization-deployed settings (server-managed, MDM/registry or managed-settings.json) that sit above all other scopes."},
+    {"term": "settings.local.json", "definition": "Personal per-project settings file (`.claude/settings.local.json`) applied over the shared project file and kept out of git."},
+    {"term": "CLAUDE.md", "definition": "Markdown file of persistent instructions loaded into context at session start, in managed, user, project and local variants."},
+    {"term": "CLAUDE.local.md", "definition": "Gitignored personal instructions at the project root, appended after CLAUDE.md at the same level."},
+    {"term": "@import", "definition": "Syntax in CLAUDE.md that pulls another file into context; recursive up to four hops."},
+    {"term": "Path-scoped rule", "definition": "A `.claude/rules/*.md` file with `paths` frontmatter that loads only when Claude works with matching files."},
+    {"term": "Permission rule", "definition": "An allow, ask or deny entry in the form Tool(specifier); evaluated deny, ask, then allow."},
+    {"term": "dontAsk mode", "definition": "Permission mode that auto-denies any action that would otherwise prompt; only pre-approved tools run."},
+    {"term": "acceptEdits mode", "definition": "Permission mode that auto-approves file edits and common filesystem commands in the working directories."},
+    {"term": "bypassPermissions", "definition": "Mode that skips permission prompts; intended for isolated environments and can be disabled by policy."},
+    {"term": "env block", "definition": "A settings key that sets environment variables for every session, scoped by the file it appears in."},
+    {"term": "Model alias", "definition": "Short name such as sonnet, opus, haiku or opusplan that resolves to the latest model for the provider."},
+    {"term": "availableModels", "definition": "Managed allowlist of models users may select; a managed `model` value alone is only a default."},
+    {"term": "MCP local scope", "definition": "Default MCP scope: private to you and one project, stored in ~/.claude.json (not settings.local.json)."},
+    {"term": ".mcp.json", "definition": "Project-root file that shares MCP server definitions with a team through version control."},
+    {"term": "managed-mcp.json", "definition": "System-level file that gives administrators exclusive control over which MCP servers load."},
+    {"term": "managedMcpServers", "definition": "Managed setting that provides remote MCP servers to all users alongside their own."},
+    {"term": "allowManagedMcpServersOnly", "definition": "Managed lock that makes only the managed allowedMcpServers list apply."},
+    {"term": "managedSourcesBehavior", "definition": "Managed key choosing first-wins (default) or merge when several managed sources deliver policy."},
+    {"term": "CLAUDE_CONFIG_DIR", "definition": "Environment variable that relocates Claude Code's home config directory, used for separate accounts."}
+  ],
+  "quiz": [
+    {
+      "q": "A team commits `.claude/settings.json` setting `\"model\": \"sonnet\"`. One developer wants Opus only in this repository, without affecting teammates or other projects. What is the best approach?",
+      "options": [
+        "Edit the committed `.claude/settings.json` to say opus",
+        "Set `\"model\": \"opus\"` in `.claude/settings.local.json` in the project",
+        "Set `\"model\": \"opus\"` in `~/.claude/settings.json`",
+        "Add a CLAUDE.md line asking Claude to use Opus"
+      ],
+      "answer": 1,
+      "explanation": "Project local settings rank above shared project settings and apply only to you in that project. The user file would be overridden by the shared project value, editing the committed file affects teammates, and CLAUDE.md cannot select a model.",
+      "source": "https://code.claude.com/docs/en/settings"
+    },
+    {
+      "q": "User settings contain `permissions.allow: [\"Bash(npm run test *)\"]` and the project's `.claude/settings.json` contains `permissions.allow: [\"Bash(npm run lint)\"]`. What is the effective allow list?",
+      "options": [
+        "Only the project's entry, because project overrides user",
+        "Only the user's entry, because user settings are loaded first",
+        "Both entries, because array settings merge across scopes",
+        "Neither, because conflicting allow lists are rejected"
+      ],
+      "answer": 2,
+      "explanation": "List keys such as permissions.allow are combined across files rather than replaced. (Committed project allow rules also require folder trust to take effect.)",
+      "source": "https://code.claude.com/docs/en/settings"
+    },
+    {
+      "q": "User settings allow `Bash(git push *)`, while the managed settings contain `ask: [\"Bash(git push *)\"]` and the project settings are silent. A developer asks Claude to push. What happens?",
+      "options": [
+        "It runs without a prompt because the user allow rule is more specific",
+        "The developer is prompted, because ask is evaluated before allow regardless of scope",
+        "It is denied automatically",
+        "It runs because user settings are applied last"
+      ],
+      "answer": 1,
+      "explanation": "Rules evaluate deny, then ask, then allow, and the first match decides. A matching ask rule prompts even when an allow rule also matches; managed policy cannot be loosened by user allow rules.",
+      "source": "https://code.claude.com/docs/en/permissions"
+    },
+    {
+      "q": "A repository has `/repo/CLAUDE.md` and `/repo/services/api/CLAUDE.md`. A developer launches Claude Code from `/repo/services/api`. How are the files used?",
+      "options": [
+        "Only the closest file loads; the parent is ignored",
+        "Both load and are concatenated, with the parent first and the closest file read last",
+        "The parent overrides the child on conflict",
+        "Neither loads until the developer runs /init"
+      ],
+      "answer": 1,
+      "explanation": "CLAUDE.md files in the working directory and every directory above it are concatenated from the filesystem root down, so the file closest to the working directory is read last. They do not override each other.",
+      "source": "https://code.claude.com/docs/en/memory"
+    },
+    {
+      "q": "Your CLAUDE.md imports `@docs/a.md`, which imports `b.md`, then `c.md`, `d.md`, `e.md`, and `f.md` in a chain. What limits this?",
+      "options": [
+        "There is no limit on import depth",
+        "Imports are limited to a maximum depth of four hops",
+        "Imports only work in the managed CLAUDE.md",
+        "Imports are limited to one level"
+      ],
+      "answer": 1,
+      "explanation": "Imported files can recursively import others up to four hops deep. Imports work in ordinary CLAUDE.md files and are not single-level.",
+      "source": "https://code.claude.com/docs/en/memory"
+    },
+    {
+      "q": "You want instructions about API conventions to load only when Claude edits files under `src/api/`, to save context. Which is the best mechanism?",
+      "options": [
+        "A `.claude/rules/api.md` file with `paths: [\"src/api/**\"]` frontmatter",
+        "A CLAUDE.local.md at the project root",
+        "A `deny` rule on everything outside `src/api/`",
+        "An `env` entry in settings.json"
+      ],
+      "answer": 0,
+      "explanation": "Path-scoped rules load only when Claude touches matching files. CLAUDE.local.md loads every session, deny rules restrict access rather than provide instructions, and env sets variables.",
+      "source": "https://code.claude.com/docs/en/memory"
+    },
+    {
+      "q": "A security team needs a guarantee that Claude never reads `.env` files, regardless of what developers put in their own settings. Which approach works?",
+      "options": [
+        "Add a line to the project CLAUDE.md telling Claude not to read .env files",
+        "Add `Read(./.env)` to `permissions.deny` in managed settings",
+        "Add `Read(./.env)` to permissions.allow in user settings",
+        "Set `permissions.defaultMode` to `plan` in the project settings"
+      ],
+      "answer": 1,
+      "explanation": "Managed deny rules cannot be overridden by any other scope. CLAUDE.md is context, not enforcement; allow rules do not block; plan mode does not deny reads and a project setting has low precedence.",
+      "source": "https://code.claude.com/docs/en/permissions"
+    },
+    {
+      "q": "An administrator wants prompts to be automatically refused for anything not explicitly pre-approved, for an unattended review job. Which permission mode fits?",
+      "options": ["acceptEdits", "plan", "dontAsk", "bypassPermissions"],
+      "answer": 2,
+      "explanation": "dontAsk auto-denies every call that would otherwise prompt, while pre-approved tools still run. acceptEdits approves edits, plan restricts edits for exploration, and bypassPermissions skips checks entirely.",
+      "source": "https://code.claude.com/docs/en/permissions"
+    },
+    {
+      "q": "A developer has `ANTHROPIC_MODEL=haiku` exported in the shell and `\"model\": \"opus\"` in user settings. They start `claude` with no flags. Which model is used at startup?",
+      "options": ["opus, because settings files win over environment variables", "haiku, because ANTHROPIC_MODEL is read before the model setting", "sonnet, the account default", "The launch fails because of the conflict"],
+      "answer": 1,
+      "explanation": "ANTHROPIC_MODEL takes precedence over the `model` key from any file. `--model` and `/model` would override ANTHROPIC_MODEL, but neither was used.",
+      "source": "https://code.claude.com/docs/en/model-config"
+    },
+    {
+      "q": "An organization wants developers limited to Sonnet and Haiku models. Which managed configuration achieves a real restriction?",
+      "options": [
+        "Set `\"model\": \"sonnet\"` in managed settings",
+        "Set `\"availableModels\": [\"sonnet\", \"haiku\"]` in managed settings",
+        "Put `ANTHROPIC_MODEL=sonnet` in the project settings env block",
+        "Tell users to use `/model sonnet` in CLAUDE.md"
+      ],
+      "answer": 1,
+      "explanation": "A managed `model` is only a starting default; the locks are availableModels and deniedModels. Project env and CLAUDE.md are not enforcement.",
+      "source": "https://code.claude.com/docs/en/model-config"
+    },
+    {
+      "q": "A team wants every developer to get the same MCP server (a shared internal tool) when they clone the repo, committed to version control. Which command and file?",
+      "options": [
+        "`claude mcp add --scope user ...`, stored in ~/.claude.json",
+        "`claude mcp add --scope project ...`, which writes `.mcp.json` in the project root",
+        "`claude mcp add` with the default scope",
+        "Add the server to `.claude/settings.local.json`"
+      ],
+      "answer": 1,
+      "explanation": "Project scope stores servers in `.mcp.json`, which is shared through version control. User and default local scope are private and stored in ~/.claude.json; settings.local.json is not an MCP server store.",
+      "source": "https://code.claude.com/docs/en/mcp"
+    },
+    {
+      "q": "A server named `db` is defined in user scope and again, with a different URL, in the project's `.mcp.json`. Which definition does Claude Code use?",
+      "options": [
+        "The user-scope definition, because it is personal",
+        "The project-scope definition, because project outranks user",
+        "A field-by-field merge of both",
+        "Both servers connect under the same name"
+      ],
+      "answer": 1,
+      "explanation": "Precedence is local, then project, then user, then plugin servers, then claude.ai connectors. Claude Code connects once using the highest-precedence definition and does not merge fields.",
+      "source": "https://code.claude.com/docs/en/mcp"
+    },
+    {
+      "q": "A security admin sets `allowedMcpServers` with `serverUrl` entries in a managed file but does not set `allowManagedMcpServersOnly`. What can developers still do?",
+      "options": [
+        "Nothing; the managed allowlist always applies alone",
+        "Add entries to their own settings allowlists, broadening what is permitted",
+        "Bypass the denylist from user settings",
+        "Delete the managed file"
+      ],
+      "answer": 1,
+      "explanation": "Without allowManagedMcpServersOnly, allowlists from every scope merge, so users can broaden them. The denylist always wins and cannot be bypassed, and developers cannot override managed files.",
+      "source": "https://code.claude.com/docs/en/managed-mcp"
+    },
+    {
+      "q": "An IT team delivers policy to laptops through both an MDM profile and a `managed-settings.json` file, and uses default settings otherwise. Which statement about what Claude Code applies is correct?",
+      "options": [
+        "It merges both automatically",
+        "It uses the highest-ranked source that delivers a policy key (MDM over the file) and ignores the other",
+        "It uses the file because files load last",
+        "It applies only the one with fewer keys"
+      ],
+      "answer": 1,
+      "explanation": "The default managedSourcesBehavior is first-wins: remote settings, then MDM, then files. Setting it to merge applies every admin source.",
+      "source": "https://code.claude.com/docs/en/managed-settings"
+    },
+    {
+      "q": "An administrator wants MCP completely disabled on every machine, with no way for users to add servers. What do they deploy?",
+      "options": [
+        "A managed-mcp.json with an empty `mcpServers` object",
+        "A `.mcp.json` with an empty object in each repository",
+        "`deniedMcpServers` with a single serverName entry",
+        "An empty allowedMcpServers in user settings"
+      ],
+      "answer": 0,
+      "explanation": "A managed-mcp.json with an empty server map gives exclusive control and blocks all other servers (leave managedMcpServers unset). A repo `.mcp.json` is not enforcement, a single deny blocks one name, and user settings can be changed by the user.",
+      "source": "https://code.claude.com/docs/en/managed-mcp"
+    }
+  ]
+}

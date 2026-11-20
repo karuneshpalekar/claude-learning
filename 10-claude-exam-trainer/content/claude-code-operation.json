@@ -1,0 +1,581 @@
+{
+ "slug": "claude-code-operation",
+ "title": "Claude Code Operation",
+ "overview": "This objective covers how to install, run and operate Claude Code day to day: interactive versus headless (`-p`) use, output formats, slash commands, permission and plan modes, checkpoints, context and session management, IDE and GitHub Actions integrations, CLI flags and cost tracking. The exam tests choosing the right mode, flag or command for a scenario (for example CI versus interactive, rewind versus branch, compact versus clear).",
+ "sources": [
+  {
+   "title": "Advanced setup (install)",
+   "url": "https://code.claude.com/docs/en/setup.md"
+  },
+  {
+   "title": "Run Claude Code programmatically",
+   "url": "https://code.claude.com/docs/en/headless.md"
+  },
+  {
+   "title": "Permission modes",
+   "url": "https://code.claude.com/docs/en/permission-modes.md"
+  },
+  {
+   "title": "Checkpointing",
+   "url": "https://code.claude.com/docs/en/checkpointing.md"
+  },
+  {
+   "title": "Commands",
+   "url": "https://code.claude.com/docs/en/commands.md"
+  },
+  {
+   "title": "CLI reference",
+   "url": "https://code.claude.com/docs/en/cli-reference.md"
+  },
+  {
+   "title": "Manage sessions",
+   "url": "https://code.claude.com/docs/en/sessions.md"
+  },
+  {
+   "title": "Explore the context window",
+   "url": "https://code.claude.com/docs/en/context-window.md"
+  },
+  {
+   "title": "IDE integrations (VS Code)",
+   "url": "https://code.claude.com/docs/en/ide-integrations.md"
+  },
+  {
+   "title": "GitHub Actions",
+   "url": "https://code.claude.com/docs/en/github-actions.md"
+  },
+  {
+   "title": "Common workflows",
+   "url": "https://code.claude.com/docs/en/common-workflows.md"
+  },
+  {
+   "title": "Manage costs effectively",
+   "url": "https://code.claude.com/docs/en/costs.md"
+  }
+ ],
+ "sections": [
+  {
+   "heading": "Installing Claude Code",
+   "notes": [
+    "**Native install is recommended**: `curl -fsSL https://claude.ai/install.sh | bash` (macOS, Linux, WSL); `irm https://claude.ai/install.ps1 | iex` on Windows PowerShell. Native installs auto-update in the background.",
+    "Alternatives: Homebrew (`brew install --cask claude-code` tracks the stable channel; `claude-code@latest` tracks latest), WinGet (`winget install Anthropic.ClaudeCode`), apt/dnf/apk repositories, and npm (`npm install -g @anthropic-ai/claude-code`, Node.js 22+). Homebrew, WinGet and Linux package-manager installs do NOT auto-update.",
+    "Requirements: macOS 13+, Windows 10 1809+, Ubuntu 20.04+, Debian 10+, Alpine 3.19+; 4 GB+ RAM; internet connection. Needs a Pro, Max, Ultra, Team, Enterprise or Console account (or Bedrock / Vertex / Foundry); the free claude.ai plan has no Claude Code access.",
+    "Verify with `claude --version`; diagnose with `claude doctor` (read-only install/settings diagnostics). Update manually with `claude update`.",
+    "Release channel: `autoUpdatesChannel` is `latest` (default) or `stable` (about a week old, skips major regressions). `DISABLE_AUTOUPDATER=1` stops background checks only; `DISABLE_UPDATES` blocks all update paths."
+   ],
+   "examTips": [
+    "Native installer = recommended and auto-updating; package managers = manual upgrades.",
+    "`DISABLE_AUTOUPDATER` does not stop `claude update`; `DISABLE_UPDATES` does.",
+    "Never `sudo npm install -g`; it breaks self-update."
+   ],
+   "source": "https://code.claude.com/docs/en/setup.md",
+   "example": {
+    "title": "Install and verify",
+    "language": "bash",
+    "code": "curl -fsSL https://claude.ai/install.sh | bash\nclaude --version\nclaude doctor\n# pin or choose a channel\ncurl -fsSL https://claude.ai/install.sh | bash -s stable\nclaude update"
+   }
+  },
+  {
+   "heading": "Interactive mode vs headless (-p)",
+   "notes": [
+    "`claude` starts an interactive session; `claude \"query\"` starts interactive with an initial prompt. `claude -p \"query\"` (print mode, the Agent SDK via CLI) runs once non-interactively and exits.",
+    "`-p` reads stdin, so you can pipe: `cat logs.txt | claude -p \"explain\"`. Piped stdin is capped at 10 MB. Exit code 0 on success, non-zero on failure.",
+    "Only the interactive UI commands are unavailable in `-p` (for example `/login`). User-invoked skills and custom commands work if you include `/skill-name` in the prompt. `/model`, `/effort`, `/rename` accept an argument; `/config key=value` sets a setting.",
+    "`--bare` skips auto-discovery of hooks, skills, plugins, MCP servers, auto memory and CLAUDE.md for fast, reproducible CI runs. It does not read OAuth/keychain, so set `ANTHROPIC_API_KEY`. Docs say it is recommended for scripted calls and will become the default for `-p` later.",
+    "Print-mode-only flags: `--max-turns`, `--max-budget-usd`, `--no-session-persistence`, `--input-format`, `--permission-prompt-tool`, `--permission-prompts`.",
+    "Permissions in `-p`: a call that needs approval is denied unless approved by a `PermissionRequest` hook, `--permission-prompt-tool`, an `--allowedTools` rule, or a permission mode (`acceptEdits`, `auto`, `dontAsk`)."
+   ],
+   "examTips": [
+    "`--max-turns` and `--max-budget-usd` only work with `-p`.",
+    "`--allowedTools` auto-approves; `--tools` restricts which built-in tools exist; `--disallowedTools` removes/denies.",
+    "Use prefix rules like `Bash(git diff *)`; the space before `*` matters (`git diff*` would also match `git diff-index`)."
+   ],
+   "source": "https://code.claude.com/docs/en/headless.md",
+   "example": {
+    "title": "Headless CI examples",
+    "language": "bash",
+    "code": "# auto-approve specific tools\nclaude -p \"Run the test suite and fix any failures\" --allowedTools \"Bash,Read,Edit\"\n\n# pipe a diff and review it\ngit diff main | claude -p \"report typos, filename:line only\"\n\n# reproducible CI run\nclaude --bare -p \"Summarize README.md\" --allowedTools \"Read\"\n\n# unattended, nobody to answer prompts\nclaude -p \"Update dependency pins\" --permission-mode auto --permission-prompts none"
+   }
+  },
+  {
+   "heading": "Output formats and structured output",
+   "notes": [
+    "`--output-format text` (default) prints plain text. `json` returns a single object with `result`, `session_id`, usage and `total_cost_usd` (with per-model breakdown). `stream-json` emits newline-delimited JSON events; the last line is a `result` message.",
+    "Streaming tokens: `--output-format stream-json --verbose --include-partial-messages`; filter `stream_event` with `text_delta` using jq. `--input-format stream-json` accepts streamed input in print mode.",
+    "`--json-schema '<schema>'` with `--output-format json` forces output to match a JSON Schema; the validated data appears in the `structured_output` field (not `result`). If no valid structured output was produced, the field is absent, so check for it. `format` is treated as an annotation, not enforced.",
+    "The `system/init` event reports model, tools, MCP servers, plugins; `system/api_retry` events report retry attempts; denials appear as `permission_denied` system messages and in `permission_denials` of the result with stream-json.",
+    "Capture session ID for later resume: `jq -r '.session_id'`."
+   ],
+   "examTips": [
+    "stream-json in print mode requires `--verbose`.",
+    "Text answer = `.result`; schema-conforming data = `.structured_output`.",
+    "`json` output includes cost, so scripts can track spend without the dashboard (client-side estimate, not billing)."
+   ],
+   "source": "https://code.claude.com/docs/en/headless.md",
+   "example": {
+    "title": "Extract structured output and session id",
+    "language": "bash",
+    "code": "claude -p \"Extract the main function names from auth.py\" \\\n  --output-format json \\\n  --json-schema '{\"type\":\"object\",\"properties\":{\"functions\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},\"required\":[\"functions\"]}' \\\n  | jq '.structured_output'\n\nsession_id=$(claude -p \"Start a review\" --output-format json | jq -r '.session_id')\nclaude -p \"Continue that review\" --resume \"$session_id\""
+   }
+  },
+  {
+   "heading": "Slash commands",
+   "notes": [
+    "Commands start at the beginning of a message. Type `/` to browse. Key built-ins: `/help`, `/init` (create CLAUDE.md), `/memory` (edit CLAUDE.md and auto memory), `/model`, `/config`, `/permissions`, `/plan [description]`, `/rewind` (aliases `/checkpoint`, `/undo`), `/resume`, `/branch`, `/rename`, `/clear`, `/compact`, `/context`, `/usage` (aliases `/cost`, `/stats`), `/diff`, `/export`, `/review` (alias of `/code-review`), `/mcp`, `/hooks`, `/ide`, `/install-github-app`, `/doctor`, `/status`, `/add-dir`, `/btw`.",
+    "`/agents` now prints a reminder to ask Claude to manage subagents (or edit `.claude/agents/`); older versions (v2.1.197 and earlier) opened an interactive UI.",
+    "Custom commands and skills are invoked as `/skill-name`; you can chain up to six skills in one message (`/skill-a /skill-b do XYZ`). Commands sent while Claude is responding are queued, except a few (such as `/status`, `/tasks`, `/usage`) that run immediately.",
+    "`/cost` is an alias for `/usage`; the session cost block shows total cost, API and wall duration, lines changed, and per-model token usage."
+   ],
+   "examTips": [
+    "Know the alias pairs: `/cost` = `/usage`; `/rewind` = `/checkpoint` = `/undo`.",
+    "`/init` creates CLAUDE.md; `/memory` edits it; `/permissions` manages rules; `/context` visualizes context; `/install-github-app` sets up the GitHub Action."
+   ],
+   "source": "https://code.claude.com/docs/en/commands.md"
+  },
+  {
+   "heading": "Plan mode",
+   "notes": [
+    "Plan mode lets Claude read files and run exploration commands and then write a plan, with edits blocked until you approve. Config value `plan`.",
+    "Enter it by pressing `Shift+Tab` until the status bar shows `plan mode on`, by prefixing a prompt with `/plan` (for example `/plan fix the auth bug`), or by starting with `claude --permission-mode plan`. Shift+Tab again exits without approving.",
+    "On approval Claude offers: use auto mode (or auto-accept edits when auto is unavailable), manually approve edits, or keep planning. `Ctrl+G` opens the plan in your editor to edit first. Accepting a plan also gives the session a generated title.",
+    "Make it the project default with `permissions.defaultMode: \"plan\"` in `.claude/settings.json` (in VS Code use `claudeCode.initialPermissionMode`). The plan is re-injected from disk after compaction. A session that ended in plan mode resumes in plan mode in the terminal."
+   ],
+   "examTips": [
+    "Plan mode is a permission mode, not a separate product feature; it is in the Shift+Tab cycle.",
+    "It is best for exploring before changing code and avoiding expensive rework."
+   ],
+   "source": "https://code.claude.com/docs/en/permission-modes.md",
+   "example": {
+    "title": "Project default to plan mode",
+    "language": "json",
+    "code": "{\n  \"permissions\": {\n    \"defaultMode\": \"plan\"\n  }\n}"
+   }
+  },
+  {
+   "heading": "Permission modes",
+   "notes": [
+    "Six modes (config value, UI name): `default` (Manual: reads only run unprompted), `acceptEdits` (reads, file edits and common filesystem commands like mkdir/touch/mv/cp inside the working directory), `plan` (reads/explore only), `auto` (everything, with a background classifier reviewing actions), `dontAsk` (only pre-approved tools run; anything that would prompt is denied; for locked-down CI), `bypassPermissions` (everything; only for isolated containers/VMs).",
+    "`manual` is accepted as an alias for `default`. `--dangerously-skip-permissions` equals `--permission-mode bypassPermissions`.",
+    "Switching: `Shift+Tab` cycles default, acceptEdits, plan (auto and bypass slot in after plan when enabled); at startup use `--permission-mode <mode>`; as a default set `permissions.defaultMode` in settings.",
+    "Deny rules apply in every mode, even bypassPermissions. Writes to protected paths (`.git`, `.claude`, shell config files) are not auto-approved except in bypassPermissions.",
+    "In `-p` runs with nothing setting a mode (v2.1.302+), Claude Code starts in Manual mode, so unapproved calls are denied. On resume in a terminal, the session's permission mode is generally restored (bypassPermissions is not)."
+   ],
+   "examTips": [
+    "CI that must never prompt and never exceed a whitelist: `dontAsk` plus `--allowedTools`.",
+    "`bypassPermissions` is for sandboxes only and still honors deny rules.",
+    "`auto` uses a classifier; it is not the same as bypass."
+   ],
+   "source": "https://code.claude.com/docs/en/permission-modes.md",
+   "example": {
+    "title": "Choosing a mode at launch",
+    "language": "bash",
+    "code": "claude --permission-mode plan          # explore first\nclaude --permission-mode acceptEdits   # iterate on reviewed code\nclaude -p \"...\" --permission-mode dontAsk   # locked-down CI\nclaude --permission-mode auto          # classifier-reviewed autonomy"
+   }
+  },
+  {
+   "heading": "Checkpoints and rewind",
+   "notes": [
+    "Claude Code automatically snapshots file state before each prompt that starts a turn. Snapshots cover the 100 most recent checkpoints and are saved with the conversation, so `/rewind` works after resuming. They are cleaned up with the session retention sweep (about 30 days, `cleanupPeriodDays`).",
+    "Open the rewind menu with `/rewind` or by pressing `Esc` twice on an empty prompt. Actions: restore code and conversation, restore conversation only, restore code only, summarize from here, summarize up to here, never mind.",
+    "Summarize options compress context like a targeted `/compact` without touching files. To branch instead of rewinding use `/branch` or `claude --continue --fork-session`.",
+    "Limitations: files changed only by Bash commands are not tracked (use git); most subagent edits and external or concurrent-session edits are not captured; symlinked and hard-linked files are skipped on restore. Checkpoints are not a replacement for version control."
+   ],
+   "examTips": [
+    "Double-Esc with text in the prompt clears the text instead of opening the menu.",
+    "Rewind restores edits made by Claude's file tools; a `rm` or `sed` via Bash on an untouched file is NOT undone.",
+    "`/rewind` summarize = compress context; restore = revert state."
+   ],
+   "source": "https://code.claude.com/docs/en/checkpointing.md"
+  },
+  {
+   "heading": "Context management: /compact, /clear, /context",
+   "notes": [
+    "`/clear [name]` starts a new conversation with empty context (previous session is saved; return with `/resume`). `/compact [instructions]` summarizes history to free space while continuing the same conversation. `/context` shows a live breakdown of what consumes the window with optimization suggestions.",
+    "Auto-compaction runs automatically near the limit; tune with `/autocompact <tokens>` and the auto-compact window settings. Models with 1M-token windows (for example Sonnet 5 and later, Fable models) use `[1m]` variants.",
+    "After compaction: system prompt, project-root CLAUDE.md, unscoped rules and auto memory are re-injected from disk; plan-mode plan is re-injected; up to five recently touched files are re-read (large ones become references); invoked skill bodies are re-injected (5,000 tokens each, 25,000 total). Path-scoped rules and nested CLAUDE.md are summarized away and reload on demand.",
+    "Add a `# Compact instructions` section to CLAUDE.md or pass focus text, for example `/compact Focus on code samples and API usage`. Delegating large reads to subagents keeps them out of main context.",
+    "Keep CLAUDE.md lean (aim under about 200 lines); move workflow-specific instructions into skills that load on demand."
+   ],
+   "examTips": [
+    "Unrelated task: `/clear`. Same task, window filling: `/compact`. Want to see why: `/context`.",
+    "Rules with `paths:` frontmatter do not survive compaction by design; put must-persist rules in the root CLAUDE.md."
+   ],
+   "source": "https://code.claude.com/docs/en/context-window.md",
+   "example": {
+    "title": "Context hygiene",
+    "language": "text",
+    "code": "/rename auth-refactor      # label before clearing\n/clear                     # unrelated task coming\n/compact focus on the auth bug fix\n/context                   # see what is eating the window\n/rewind -> Summarize from here  # compress only the verbose tail"
+   }
+  },
+  {
+   "heading": "Resuming and managing sessions",
+   "notes": [
+    "Sessions are saved locally as JSONL transcripts at `~/.claude/projects/<project>/<session-id>.jsonl` (default 30-day retention).",
+    "`claude --continue` / `-c` reopens the most recent session in the current directory; `claude --resume` / `-r` opens the picker; `claude --resume <name-or-id>` resumes directly; `/resume` switches inside a session; `claude --from-pr <n>` filters to sessions linked to a PR. `--session-id <uuid>` pins an ID; `-n/--name` and `/rename` name sessions.",
+    "`--fork-session` (with `--resume`/`--continue`) creates a new session ID instead of reusing the original; `/branch [name]` forks from inside the session.",
+    "`--continue` and the picker skip sessions created with `claude -p` or the Agent SDK, but `claude -p --continue` includes them and any session can be resumed by ID. `--no-session-persistence` (print mode) prevents saving.",
+    "Resume restores history, model, agent and (in the terminal) permission mode, but NOT `--mcp-config`, `--settings`, `--plugin-dir`, `--fallback-model` or `--add-dir` directories; pass those again."
+   ],
+   "examTips": [
+    "Resume by session ID works from any directory; the picker is scoped to the project (Ctrl+A widens to all projects, Ctrl+W to worktrees).",
+    "Use fork to keep the original intact; plain resume in two terminals interleaves into one transcript."
+   ],
+   "source": "https://code.claude.com/docs/en/sessions.md",
+   "example": {
+    "title": "Resume patterns",
+    "language": "bash",
+    "code": "claude -n auth-refactor            # name at start\nclaude --resume auth-refactor      # resume by name\nclaude --continue --fork-session   # branch the latest session\nclaude -p \"Now focus on queries\" --continue\nclaude -p --resume <session-id> --output-format json \"summarize\" | jq -r '.result'"
+   }
+  },
+  {
+   "heading": "IDE integrations",
+   "notes": [
+    "VS Code extension (VS Code 1.94.0+; also installable in forks such as Cursor): a native chat panel with side-by-side diffs, @-mentions with line ranges, session history, checkpoints, permission modes and plugin management. Open via the Spark icon, Command Palette (`Claude Code: Open in New Tab`) or status bar.",
+    "Selection context: Claude automatically sees your selection and open file; `Option+K` / `Alt+K` inserts an `@file#lines` reference. Controlled by `claudeCode.attachSelection` and `claudeCode.attachOpenFile`.",
+    "The extension runs a local MCP server named `ide` bound to 127.0.0.1 with a token in `~/.claude/ide/<port>.lock`. Model-visible tools: `mcp__ide__getDiagnostics` (read-only Problems panel) and `mcp__ide__executeCode` (Jupyter, requires your confirmation each time).",
+    "From an external terminal run `/ide` to connect (it installs the extension unless `autoInstallIdeExtension` is disabled); `claude --ide` auto-connects at startup if exactly one valid IDE is available. In the VS Code integrated terminal, `claude` connects automatically. JetBrains IDEs are also supported through a plugin (see the IDE docs).",
+    "URI handler: `vscode://anthropic.claude-code/open?prompt=...` pre-fills a prompt (not submitted) and `session` resumes a session."
+   ],
+   "examTips": [
+    "`/ide` manages IDE connection; `--ide` is the startup flag.",
+    "Set VS Code's starting mode with `claudeCode.initialPermissionMode`; the extension does not read project settings for it.",
+    "Diff review in the IDE applies in Manual mode."
+   ],
+   "source": "https://code.claude.com/docs/en/ide-integrations.md"
+  },
+  {
+   "heading": "GitHub Actions",
+   "notes": [
+    "The `anthropics/claude-code-action@v1` action runs Claude Code in workflows. Quick setup: run `/install-github-app` (needs `gh` authenticated, repo admin access, github.com only); it installs the Claude GitHub App, stores a secret, and opens a PR with workflow files. Manual setup: install the app, add a secret, copy `examples/claude.yml`.",
+    "Secrets: `ANTHROPIC_API_KEY` (passed as `anthropic_api_key`) or `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`, passed as `claude_code_oauth_token`). Never commit keys. Org rollouts can use workload identity federation with `id-token: write`.",
+    "Two modes, auto-detected: **interactive** (no `prompt` input; responds to `@claude` in issue/PR comments, reviews or new issues) and **automation** (a `prompt` input; runs on any event such as `pull_request` or `schedule`).",
+    "Key inputs: `prompt`, `claude_args` (any CLI flag, for example `--max-turns`, `--model`, `--allowedTools`, `--mcp-config`), `trigger_phrase`, `github_token`, `plugin_marketplaces`, `plugins`, `settings`. Providers: `use_bedrock`, `use_vertex`, `use_foundry` via OIDC.",
+    "Runs require a triggering user with write access and a human actor (bots need `allowed_bots`). Cost = GitHub Actions minutes + API tokens; limit with `--max-turns`, workflow timeouts, concurrency controls, and a concise CLAUDE.md.",
+    "Upgrading from beta: `@beta` to `@v1`, drop `mode`, `direct_prompt` becomes `prompt`, CLI options move into `claude_args`, `custom_instructions` becomes `--append-system-prompt`."
+   ],
+   "examTips": [
+    "Presence of `prompt` = automation mode; absence = waits for `@claude`.",
+    "A plain-text prompt in automation mode has no shell/GitHub access until you grant tools via `--allowedTools` in `claude_args`.",
+    "Commits made with the default `GITHUB_TOKEN` do not trigger CI; let the action authenticate as the Claude GitHub App."
+   ],
+   "source": "https://code.claude.com/docs/en/github-actions.md",
+   "example": {
+    "title": "Respond to @claude mentions",
+    "language": "yaml",
+    "code": "name: Claude Code\non:\n  issue_comment:\n    types: [created]\n  pull_request_review_comment:\n    types: [created]\njobs:\n  claude:\n    if: contains(github.event.comment.body, '@claude')\n    runs-on: ubuntu-latest\n    permissions:\n      contents: write\n      pull-requests: write\n      issues: write\n      id-token: write\n      actions: read\n    steps:\n      - uses: actions/checkout@v6\n        with:\n          fetch-depth: 1\n      - uses: anthropics/claude-code-action@v1\n        with:\n          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}\n          claude_args: \"--max-turns 5\""
+   }
+  },
+  {
+   "heading": "Common workflows",
+   "notes": [
+    "Explore: start `claude` in the repo and ask for an overview, then narrow (architecture, data models, auth). Use `@path` to include files or directories (a directory reference lists files, not contents) and `@server:resource` for MCP resources.",
+    "Fix bugs: give the error and the reproduction command, ask for options, then apply. Refactor in small testable steps and run tests. Create PRs by asking `create a pr`; `claude --from-pr <n>` finds the linked session later.",
+    "Plan before editing with `claude --permission-mode plan`. Delegate research to subagents so file reads stay out of the main context. Pipe into scripts: `git log --oneline -20 | claude -p \"summarize these recent commits\"`.",
+    "Parallel work: `claude --worktree <name>` (`-w`) creates an isolated git worktree under `.claude/worktrees/<name>`; the repo needs at least one commit.",
+    "Scheduling options: cloud routines, desktop scheduled tasks, GitHub Actions cron, or `/loop` inside a session.",
+    "Images: drag/drop, paste with `Ctrl+V` (`Alt+V` on Windows/WSL) or give a path."
+   ],
+   "examTips": [
+    "Worktrees prevent edit collisions between concurrent sessions.",
+    "Specific prompts ('add input validation to login in auth.ts') cost less than vague ones."
+   ],
+   "source": "https://code.claude.com/docs/en/common-workflows.md",
+   "example": {
+    "title": "Parallel sessions and piping",
+    "language": "bash",
+    "code": "claude --worktree feature-auth      # isolated checkout\nclaude --worktree bugfix-123         # second terminal\ngit diff main | claude -p \"review for security issues\" --output-format json"
+   }
+  },
+  {
+   "heading": "CLI flags reference",
+   "notes": [
+    "Session: `-c/--continue`, `-r/--resume`, `--fork-session`, `--session-id`, `-n/--name`, `--from-pr`, `--no-session-persistence` (print only).",
+    "Model: `--model` (alias `sonnet`, `opus`, `haiku`, `fable`, or full name), `--fallback-model` (comma-separated chain if overloaded).",
+    "Permissions/tools: `--permission-mode`, `--dangerously-skip-permissions`, `--allowedTools`, `--disallowedTools` (a bare name removes the tool from context; a scoped rule like `Bash(rm *)` only denies matching calls), `--tools` (restrict the built-in set; `\"\"` disables all), `--permission-prompt-tool`, `--permission-prompts none`.",
+    "Print mode: `-p/--print`, `--output-format`, `--input-format`, `--json-schema`, `--max-turns`, `--max-budget-usd`, `--include-partial-messages`, `--verbose`, `--bare`.",
+    "Prompt/config: `--append-system-prompt` (keeps defaults), `--system-prompt` / `--system-prompt-file` (replace default), `--settings`, `--mcp-config`, `--agents` (JSON subagents), `--add-dir`, `--plugin-dir`, `--worktree/-w`, `--ide`, `--chrome`.",
+    "Subcommands: `claude update`, `claude install [version|stable|latest]`, `claude doctor`, `claude gateway`, `claude setup-token`, `claude purge`."
+   ],
+   "examTips": [
+    "Append vs replace: `--append-system-prompt` keeps Claude Code's behavior; `--system-prompt` replaces it entirely.",
+    "`--allowedTools` = auto-approve; `--tools` = availability; `--disallowedTools` = deny.",
+    "Add `--bare` for reproducible CI."
+   ],
+   "source": "https://code.claude.com/docs/en/cli-reference.md"
+  },
+  {
+   "heading": "Cost tracking and reduction",
+   "notes": [
+    "`/usage` (alias `/cost`) shows the session block: total cost, API and wall duration, code changes and per-model token usage. The dollar figure is computed locally from token counts at list price (an estimate, not billing); admins can set `modelPricing` in managed settings to reflect contracted rates. Totals reset on `/clear`.",
+    "On Pro/Max/Ultra/Team/Enterprise, `/usage` also shows plan limit bars and attribution to skills, subagents, plugins and MCP servers with recommendations. `/insights` analyzes your recent sessions. `/usage-credits` manages extra usage on subscriptions.",
+    "Print mode: `--output-format json` includes `total_cost_usd`; `--max-budget-usd` stops a run at a cap (client-side estimate; subagent spend counts). Continued sessions report the whole conversation total.",
+    "Organization tracking: Claude Console workspaces (auto-created 'Claude Code' workspace, spend limits, Console dashboard, Claude Code Analytics API); Teams/Enterprise spend reports and seat allowances; Bedrock/Vertex/Foundry use cloud billing plus OpenTelemetry or an LLM gateway. Reference average: about $13 per developer per active day, $150-250 per month, under $30/day for 90% of users.",
+    "Reduce spend: `/clear` between tasks, `/compact` with focus, use Sonnet for most work and Opus sparingly, haiku for simple subagents, lower `/effort` or thinking budget, disable unused MCP servers (run `/context`), use subagents for verbose output, hooks to filter output, specific prompts, plan mode before big changes. Long idle sessions can miss the prompt cache and reprocess full context.",
+    "Rate-limit guidance is per-user TPM/RPM that shrinks as team size grows (for example 1-5 users: 200k-300k TPM, 5-7 RPM; 500+ users: 10k-15k TPM)."
+   ],
+   "examTips": [
+    "Cost numbers are client-side estimates; authoritative billing is the Console/cloud bill.",
+    "Subscribers' session cost is not what they are billed; API users' is the relevant figure.",
+    "`--max-turns` limits iterations; `--max-budget-usd` limits dollars; both print-mode only."
+   ],
+   "source": "https://code.claude.com/docs/en/costs.md",
+   "example": {
+    "title": "Budget-capped CI run",
+    "language": "bash",
+    "code": "claude -p \"Refactor utils.js\" \\\n  --max-turns 10 --max-budget-usd 2.00 \\\n  --output-format json | jq '{cost: .total_cost_usd, result: .result}'"
+   }
+  }
+ ],
+ "keyTakeaways": [
+  "Recommended install is the native installer (auto-updates); Homebrew/WinGet/package managers need manual upgrades; verify with `claude --version` and `claude doctor`.",
+  "`claude -p` is non-interactive; `--output-format` is text, json or stream-json; `--json-schema` puts validated data in `structured_output`.",
+  "`--max-turns` and `--max-budget-usd` are print-mode only; `--bare` gives reproducible CI runs and needs `ANTHROPIC_API_KEY`.",
+  "Permission modes: default(Manual), acceptEdits, plan, auto, dontAsk, bypassPermissions; Shift+Tab cycles; deny rules apply in every mode.",
+  "`dontAsk` is for locked-down CI; `bypassPermissions` only for isolated containers/VMs.",
+  "Plan mode: Shift+Tab, `/plan`, or `--permission-mode plan`; edits blocked until you approve the plan.",
+  "`/rewind` (Esc Esc; aliases /checkpoint, /undo) restores code and/or conversation; Bash-only file changes and most subagent edits are not tracked.",
+  "`/clear` empties context, `/compact [focus]` summarizes, `/context` visualizes usage; root CLAUDE.md survives compaction, path-scoped rules do not.",
+  "`-c` continues the latest session, `-r` resumes by name/ID or picker, `--fork-session`/`/branch` copies a session; resume does not restore `--mcp-config` or `--add-dir`.",
+  "GitHub Action: `/install-github-app`, secrets `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`; no `prompt` = interactive `@claude`, with `prompt` = automation; pass flags via `claude_args`.",
+  "`/usage` (alias `/cost`) shows a client-side cost estimate; Console workspaces and cloud billing are authoritative; reduce cost with /clear, model choice, and subagents."
+ ],
+ "glossary": [
+  {
+   "term": "Headless / print mode",
+   "definition": "Non-interactive `claude -p` run that prints a result and exits; the CLI form of the Agent SDK."
+  },
+  {
+   "term": "stream-json",
+   "definition": "Newline-delimited JSON output format for real-time events; needs `--verbose` in print mode."
+  },
+  {
+   "term": "structured_output",
+   "definition": "Result field holding data validated against `--json-schema`."
+  },
+  {
+   "term": "Permission mode",
+   "definition": "Baseline approval policy: default, acceptEdits, plan, auto, dontAsk or bypassPermissions."
+  },
+  {
+   "term": "Plan mode",
+   "definition": "Read-only exploration mode where Claude proposes a plan and cannot edit until approved."
+  },
+  {
+   "term": "Checkpoint",
+   "definition": "Automatic snapshot of file state before each turn-starting prompt, used by /rewind."
+  },
+  {
+   "term": "/compact",
+   "definition": "Summarizes conversation history to free context while continuing the session."
+  },
+  {
+   "term": "/clear",
+   "definition": "Starts a new empty-context conversation; the old one stays resumable."
+  },
+  {
+   "term": "Session",
+   "definition": "A saved conversation tied to a project directory, stored as a JSONL transcript."
+  },
+  {
+   "term": "Fork session",
+   "definition": "A copy of a conversation with a new session ID (`--fork-session`, `/branch`)."
+  },
+  {
+   "term": "Bare mode",
+   "definition": "`--bare` skips auto-discovery of hooks, skills, plugins, MCP, memory and CLAUDE.md for reproducible runs."
+  },
+  {
+   "term": "claude-code-action",
+   "definition": "The GitHub Action (`anthropics/claude-code-action@v1`) that runs Claude Code in workflows."
+  },
+  {
+   "term": "Worktree",
+   "definition": "Isolated git checkout used for parallel sessions via `claude --worktree <name>`."
+  },
+  {
+   "term": "Auto-compact",
+   "definition": "Automatic compaction as the context window nears its limit."
+  }
+ ],
+ "quiz": [
+  {
+   "q": "A CI job runs `claude -p` to review a diff and must never hang waiting for a permission prompt, only using Read and `git diff` commands. Which configuration is most appropriate?",
+   "options": [
+    "`--permission-mode bypassPermissions` on the CI runner",
+    "`--permission-mode dontAsk` with `--allowedTools \"Read,Bash(git diff *)\"`",
+    "Default Manual mode with no flags and rely on the user to approve",
+    "`--permission-mode plan` so Claude can edit after approval"
+   ],
+   "answer": 1,
+   "explanation": "dontAsk denies anything that would prompt while still running pre-approved tools, ideal for locked-down CI. bypassPermissions is only for isolated containers and is excessive. Manual mode would deny unapproved calls but offers no whitelist for the diff command. Plan mode blocks edits and expects interactive approval.",
+   "source": "https://code.claude.com/docs/en/permission-modes.md"
+  },
+  {
+   "q": "A script needs to parse Claude's answer as data matching a schema. Which combination and field should it use?",
+   "options": [
+    "`--output-format text` and parse `.result`",
+    "`--output-format stream-json` only, read the first line",
+    "`--output-format json --json-schema '<schema>'` and read `structured_output`",
+    "`--input-format stream-json` and read `.schema`"
+   ],
+   "answer": 2,
+   "explanation": "json plus --json-schema puts schema-conforming data in `structured_output`; `.result` holds text. stream-json is for incremental events. --input-format concerns input, not output.",
+   "source": "https://code.claude.com/docs/en/headless.md"
+  },
+  {
+   "q": "You want to see token-by-token streaming from a headless run. Which command is correct?",
+   "options": [
+    "`claude -p \"q\" --output-format stream-json`",
+    "`claude -p \"q\" --output-format stream-json --verbose --include-partial-messages`",
+    "`claude -p \"q\" --stream`",
+    "`claude -p \"q\" --output-format json --include-partial-messages`"
+   ],
+   "answer": 1,
+   "explanation": "Streaming text deltas requires stream-json with --verbose and --include-partial-messages. There is no --stream flag, and plain json returns one object.",
+   "source": "https://code.claude.com/docs/en/headless.md"
+  },
+  {
+   "q": "Claude edited several files with its edit tools and also ran `rm old_config.yml` through Bash on a file it never edited. You run `/rewind` and choose 'Restore code'. What happens?",
+   "options": [
+    "Both the edits and the deleted file are restored",
+    "Only the edits Claude made with file tools are reverted; the deleted file is not restored",
+    "Nothing is reverted because Bash was used in the session",
+    "Everything is restored from git automatically"
+   ],
+   "answer": 1,
+   "explanation": "Checkpoints track file-editing tools; a file changed only by Bash is not tracked and needs version control to recover. Bash use elsewhere does not disable rewind, and Claude Code does not invoke git for restore.",
+   "source": "https://code.claude.com/docs/en/checkpointing.md"
+  },
+  {
+   "q": "You are mid-task and the context is filling, but you want to keep working on the same feature with key details preserved. What is the best action?",
+   "options": [
+    "`/clear`",
+    "`/compact focus on the auth bug fix`",
+    "`/resume`",
+    "`/context all`"
+   ],
+   "answer": 1,
+   "explanation": "/compact summarizes the conversation and continues the same task, optionally with focus instructions. /clear discards context, /resume switches sessions, /context only visualizes usage.",
+   "source": "https://code.claude.com/docs/en/context-window.md"
+  },
+  {
+   "q": "After `/compact`, which of these is NOT reliably preserved verbatim?",
+   "options": [
+    "Project-root CLAUDE.md",
+    "Auto memory",
+    "A rule file with `paths:` frontmatter that was loaded earlier by reading a matching file",
+    "The plan Claude wrote in plan mode"
+   ],
+   "answer": 2,
+   "explanation": "Root CLAUDE.md, auto memory and the plan are re-injected from disk. Path-scoped rules were loaded into message history and are summarized away; they reload on demand. Move must-persist rules to root CLAUDE.md.",
+   "source": "https://code.claude.com/docs/en/context-window.md"
+  },
+  {
+   "q": "You have a long-running experiment session and want to try a different approach without losing the original conversation. Which is correct?",
+   "options": [
+    "`/clear` then paste the history",
+    "`claude --continue --fork-session` (or `/branch`)",
+    "`/rewind` and restore conversation, which keeps both",
+    "`claude -p --no-session-persistence`"
+   ],
+   "answer": 1,
+   "explanation": "Forking creates a new session ID and leaves the original intact. Rewind rolls back the same session. /clear starts empty. no-session-persistence prevents saving.",
+   "source": "https://code.claude.com/docs/en/sessions.md"
+  },
+  {
+   "q": "A team resumes yesterday's session with `claude --resume auth-refactor` but their MCP servers are missing. Why?",
+   "options": [
+    "Resume never restores conversation history",
+    "The session depended on `--mcp-config`, which is not restored and must be passed again",
+    "MCP servers are deleted after 24 hours",
+    "They must use `--continue` instead"
+   ],
+   "answer": 1,
+   "explanation": "Flags like --mcp-config, --settings, --plugin-dir, --fallback-model and --add-dir directories are not restored on resume; settings-file configuration is re-read. History and model are restored.",
+   "source": "https://code.claude.com/docs/en/sessions.md"
+  },
+  {
+   "q": "A GitHub workflow using `anthropics/claude-code-action@v1` has NO `prompt` input. What does it do?",
+   "options": [
+    "Fails validation",
+    "Runs in interactive mode, waiting for `@claude` in comments/reviews/issues",
+    "Runs on every push with a default prompt",
+    "Runs in automation mode and posts to the run log"
+   ],
+   "answer": 1,
+   "explanation": "Without a prompt the action is interactive and responds to the trigger phrase (default @claude). With a prompt it runs in automation mode on any configured event.",
+   "source": "https://code.claude.com/docs/en/github-actions.md"
+  },
+  {
+   "q": "In a scheduled GitHub Actions workflow, Claude with a plain-text `prompt` cannot read issues or run shell commands. What is the fix?",
+   "options": [
+    "Set `mode: agent`",
+    "Grant tools with `--allowedTools` in `claude_args` (for example specific MCP/Bash tools)",
+    "Use `@beta` instead of `@v1`",
+    "Add `trigger_phrase`"
+   ],
+   "answer": 1,
+   "explanation": "In automation mode a plain prompt has no shell or GitHub API access until tools are granted via --allowedTools in claude_args or permissions.allow in settings. The `mode` input was removed in v1.",
+   "source": "https://code.claude.com/docs/en/github-actions.md"
+  },
+  {
+   "q": "Which secrets can authenticate the Claude Code GitHub Action directly against Anthropic?",
+   "options": [
+    "`ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`",
+    "`GITHUB_TOKEN` only",
+    "`CLAUDE_SESSION_COOKIE`",
+    "`ANTHROPIC_ADMIN_KEY`"
+   ],
+   "answer": 0,
+   "explanation": "The API key (anthropic_api_key input) or an OAuth subscription token from `claude setup-token` (claude_code_oauth_token). GITHUB_TOKEN is for GitHub operations, not Anthropic auth.",
+   "source": "https://code.claude.com/docs/en/github-actions.md"
+  },
+  {
+   "q": "You must cap a headless run at roughly $2 of estimated spend and 10 agentic iterations. Which flags do this?",
+   "options": [
+    "`--max-tokens 2000 --turns 10`",
+    "`--max-budget-usd 2.00 --max-turns 10` with `-p`",
+    "`--budget 2 --limit 10`",
+    "`/cost 2` and `/compact`"
+   ],
+   "answer": 1,
+   "explanation": "--max-budget-usd and --max-turns are print-mode flags. The cost is a client-side estimate and may differ from billing.",
+   "source": "https://code.claude.com/docs/en/cli-reference.md"
+  },
+  {
+   "q": "An API-billed developer sees the `/usage` session cost. How should they interpret it?",
+   "options": [
+    "It is the exact invoice amount",
+    "A local estimate computed from token counts at list price unless an admin configured `modelPricing`",
+    "It includes all teammates' usage",
+    "It never resets"
+   ],
+   "answer": 1,
+   "explanation": "The figure is a client-side estimate; authoritative billing is in the Console or cloud provider. It is per session and resets on /clear.",
+   "source": "https://code.claude.com/docs/en/costs.md"
+  },
+  {
+   "q": "A developer connected to VS Code from an external terminal wants Claude to share the editor connection. Which is right?",
+   "options": [
+    "Run `/ide` in the CLI (or start with `claude --ide`)",
+    "Edit `~/.claude/ide/` lock file manually",
+    "Run `claude --chrome`",
+    "Install the extension and nothing else is possible"
+   ],
+   "answer": 0,
+   "explanation": "/ide manages and connects IDE integrations (installing the extension if needed); --ide connects at startup when exactly one IDE is available. --chrome is browser integration.",
+   "source": "https://code.claude.com/docs/en/ide-integrations.md"
+  },
+  {
+   "q": "You want Claude to propose changes to a risky module and not touch any file until you approve. How do you start?",
+   "options": [
+    "`claude --permission-mode plan` (or Shift+Tab to plan mode)",
+    "`claude --permission-mode acceptEdits`",
+    "`claude -p --max-turns 1`",
+    "`claude --tools \"\"`"
+   ],
+   "answer": 0,
+   "explanation": "Plan mode lets Claude research and write a plan with edits blocked until approval. acceptEdits auto-approves edits, the opposite. --tools \"\" disables all built-in tools including reads.",
+   "source": "https://code.claude.com/docs/en/permission-modes.md"
+  }
+ ]
+}

@@ -1,0 +1,410 @@
+{
+  "slug": "claude-app-design",
+  "title": "Claude App Design",
+  "overview": "This objective covers the design decisions you make when building an application on Claude: whether to use a fixed workflow or an autonomous agent, how to manage state on a stateless API, how to ground answers in retrieved content with citations, how to design tools, and how to trade off latency, cost and reliability (streaming, smaller models, caching, batching, structured outputs, hallucination controls). The exam tests choosing the right technique for a scenario, so know each feature's purpose, limits and incompatibilities.",
+  "sources": [
+    {"title": "Building effective agents (Anthropic Engineering)", "url": "https://www.anthropic.com/engineering/building-effective-agents"},
+    {"title": "Using the Messages API", "url": "https://platform.claude.com/docs/en/build-with-claude/working-with-messages"},
+    {"title": "Search results", "url": "https://platform.claude.com/docs/en/build-with-claude/search-results"},
+    {"title": "Citations", "url": "https://platform.claude.com/docs/en/build-with-claude/citations"},
+    {"title": "Define tools", "url": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools"},
+    {"title": "Writing tools for agents (Anthropic Engineering)", "url": "https://www.anthropic.com/engineering/writing-tools-for-agents"},
+    {"title": "Reducing latency", "url": "https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/reduce-latency"},
+    {"title": "Streaming messages", "url": "https://platform.claude.com/docs/en/build-with-claude/streaming"},
+    {"title": "Prompt caching", "url": "https://platform.claude.com/docs/en/build-with-claude/prompt-caching"},
+    {"title": "Batch processing", "url": "https://platform.claude.com/docs/en/build-with-claude/batch-processing"},
+    {"title": "Structured outputs", "url": "https://platform.claude.com/docs/en/build-with-claude/structured-outputs"},
+    {"title": "Reduce hallucinations", "url": "https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/reduce-hallucinations"},
+    {"title": "Guides to common use cases", "url": "https://platform.claude.com/docs/en/about-claude/use-case-guides/overview"}
+  ],
+  "sections": [
+    {
+      "heading": "Workflows vs agents: choosing the architecture",
+      "notes": [
+        "**Workflows** orchestrate LLM calls and tools through predefined code paths. **Agents** let the model direct its own process and tool use, deciding the next step from environment feedback.",
+        "Anthropic's guidance: start with the simplest solution and add complexity only when it measurably improves results. A single LLM call with retrieval and good examples is often enough.",
+        "Use a workflow when the task is well defined and steps are predictable (predictability, consistency, lower cost and latency). Use an agent when the number and order of steps cannot be predicted and you can trust the model's judgment, accepting higher cost and compounding-error risk.",
+        "The building block is the **augmented LLM**: a model with retrieval, tools and memory that it can use on its own.",
+        "Agents should check ground truth each step (tool results, code execution), support human checkpoints, and have stopping conditions such as a maximum iteration count. Test them in sandboxes with guardrails.",
+        "Frameworks speed up setup but can hide prompts and responses and make debugging harder; start with direct API calls and understand any framework code you adopt.",
+        "Build paths: the Messages API gives the most control (you write the agent loop and run tools), the Claude Agent SDK provides the loop in a process you operate, and Claude Managed Agents hosts the loop and runtime for you."
+      ],
+      "example": {
+        "title": "Five workflow patterns at a glance",
+        "language": "text",
+        "code": "Prompt chaining      : step1 -> gate(check) -> step2 -> step3   (trade latency for accuracy)\nRouting              : classify input -> specialised prompt/model     (easy -> small model, hard -> large)\nParallelization      : sectioning (independent subtasks) | voting (same task N times)\nOrchestrator-workers : LLM plans subtasks dynamically -> workers -> synthesize (e.g. multi-file code edits)\nEvaluator-optimizer  : generator <-> evaluator loop until criteria met   (needs clear criteria)\nAgent                : loop { model picks tool -> run -> observe } until done or max iterations"
+      },
+      "examTips": [
+        "Fixed, known steps = workflow (prompt chaining). Unpredictable subtasks decided at runtime = orchestrator-workers. Open-ended with unknown step count = agent.",
+        "Parallelization has two flavours: sectioning (split independent work for speed) and voting (repeat for confidence).",
+        "Orchestrator-workers differs from parallelization because the subtasks are not predefined; the orchestrator LLM decides them.",
+        "If the scenario says 'simplest approach that works', do not pick a full agent."
+      ],
+      "source": "https://www.anthropic.com/engineering/building-effective-agents"
+    },
+    {
+      "heading": "Stateless API and conversation state management",
+      "notes": [
+        "The Messages API is **stateless**: you must send the full conversation history on every request. Claude does not remember earlier calls.",
+        "Maintain a `messages` array alternating `user` and `assistant` turns, append Claude's reply, append the next user message, and resend. Earlier assistant turns can be synthetic (not necessarily generated by Claude).",
+        "Tool use is part of state: when Claude returns `tool_use` blocks, append the assistant message, then a user message containing matching `tool_result` blocks.",
+        "Long histories grow cost and latency; trim, summarize older turns, and use prompt caching to make the repeated prefix cheaper (see caching section).",
+        "A beta feature called message threads lets the API keep the conversation so later requests send only new messages. A thread expires 5 minutes after its last request and is deleted within 1 hour of last use. Treat it as beta; the baseline exam answer is still 'resend full history'.",
+        "Newer models allow a mid-conversation `system` role message (after a user turn) to add instructions later without invalidating the cached prefix. It cannot be the first entry in `messages`; use the top-level `system` field for instructions from the start.",
+        "Prefill (starting the assistant turn yourself) is not supported on Claude 4.6 and later models and returns a 400; use structured outputs or system prompt instructions instead.",
+        "Sampling parameters `temperature`, `top_p`, `top_k` are not supported on Claude 4.7 and later (and any model under API version 2026-10-21); setting non-default values returns a 400, so steer behavior with prompting."
+      ],
+      "example": {
+        "title": "Multi-turn conversation by resending history",
+        "language": "python",
+        "code": "import anthropic\nclient = anthropic.Anthropic()\nhistory = []\n\ndef chat(user_text):\n    history.append({\"role\": \"user\", \"content\": user_text})\n    resp = client.messages.create(\n        model=\"claude-sonnet-5-5\",\n        max_tokens=1024,\n        messages=history,          # full history every call\n    )\n    text = next(b.text for b in resp.content if b.type == \"text\")\n    history.append({\"role\": \"assistant\", \"content\": text})\n    return text\n\nchat(\"Hello, Claude\")\nchat(\"Can you describe LLMs to me?\")"
+      },
+      "examTips": [
+        "'Claude forgot what I said earlier' almost always means the app did not resend prior messages.",
+        "State lives in your application (or your database), not in Claude.",
+        "Do not rely on prefill or temperature on current models; both are gone or restricted."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/working-with-messages"
+    },
+    {
+      "heading": "RAG, search results and citations",
+      "notes": [
+        "**RAG**: retrieve relevant content from your own store, put it in the prompt, and have Claude answer from it. This grounds answers and reduces hallucination.",
+        "**Search result content blocks** (`type: search_result`) let you feed retrieved chunks with source attribution so Claude can cite them like web search results. Required fields: `type`, `source` (URL or any stable identifier such as `kb://article-1234`), `title`, and `content` (array of text blocks). Optional: `citations: {enabled: true}` and `cache_control`.",
+        "Two delivery methods: (1) returned from your custom retrieval tool inside a `tool_result` (dynamic RAG), or (2) placed as top-level content in a user message (pre-fetched or cached content).",
+        "Citations are disabled by default on search results; set `citations.enabled` and keep it consistent across all search results in a request. If the web search tool is also enabled in the request, citations must be enabled on all `search_result` blocks.",
+        "Search results hold text only and can appear only in user messages (including tool results); assistant messages containing them are rejected. Managed Agents accept them only in tool results.",
+        "The **Citations** feature works on `document` blocks: plain text (sentence chunking, character indices 0-indexed), PDF (sentence chunking, page numbers 1-indexed) and custom content (your own blocks, no extra chunking, block indices 0-indexed). Set `citations.enabled=true` on all or none of the documents in a request.",
+        "To cite individual sentences from RAG chunks, put each chunk in a plain-text document; if you want no further chunking or your own granularity, use custom content documents.",
+        "The response splits into multiple text blocks, each claim carrying a `citations` list (for example `char_location` or `search_result_location` with `cited_text` and indices). `cited_text` does not count toward output tokens or, when passed back, input tokens.",
+        "Citations are **incompatible with structured outputs**: enabling citations on documents or search results together with `output_config.format` returns a 400 error. If a search finds nothing, return a plain text block such as 'No results found.' rather than raising an error.",
+        "Document `title` and `context` fields are passed to the model but cannot be cited from; use `context` for metadata."
+      ],
+      "example": {
+        "title": "Knowledge-base tool returning search_result blocks",
+        "language": "python",
+        "code": "tool_result = {\n    \"type\": \"tool_result\",\n    \"tool_use_id\": tool_use_block.id,\n    \"content\": [\n        {\n            \"type\": \"search_result\",\n            \"source\": \"https://docs.company.com/api-reference\",\n            \"title\": \"API Reference - Authentication\",\n            \"content\": [\n                {\"type\": \"text\",\n                 \"text\": \"All API requests must include an API key in the Authorization header.\"}\n            ],\n            \"citations\": {\"enabled\": True},\n        }\n    ],\n}\n# Send as a user message with the assistant's tool_use message before it.\n# Claude's answer will include search_result_location citations (source, title, cited_text)."
+      },
+      "examTips": [
+        "Need per-claim source attribution from your own retrieval? Search result blocks with citations enabled.",
+        "Need exact structured JSON AND citations in the same call? Not possible; pick one or parse citations from lines of text.",
+        "Citation index conventions differ by document type: char (0-indexed), page (1-indexed), block (0-indexed)."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/search-results"
+    },
+    {
+      "heading": "Tool design",
+      "notes": [
+        "A tool definition has `name` (matching `^[a-zA-Z0-9_-]{1,128}$`), `description`, `input_schema` (JSON Schema) and optional `input_examples`.",
+        "**Descriptions are the most important factor** in tool performance: say what the tool does, when to use it and when not to, what each parameter means, and caveats or what it does not return. Aim for at least 3-4 sentences.",
+        "Use `input_examples` (schema-valid) for complex or format-sensitive inputs. Invalid examples return a 400, and they add tokens (roughly 20-50 for simple, 100-200 for nested). Not supported on server tools or computer/browser use toolsets.",
+        "**Consolidate** related operations into fewer, more capable tools (one tool with an `action` parameter instead of `create_pr`, `review_pr`, `merge_pr`) and avoid overlapping tools.",
+        "**Namespace** names by service/resource (`github_list_prs`, `asana_projects_search`) to make selection unambiguous, especially with tool search.",
+        "**Return high-signal output**: semantic, stable identifiers and natural-language names rather than opaque UUIDs or MIME types, only the fields needed for the next step, with pagination, filtering and truncation defaults. A `response_format` enum (concise vs detailed) can cut tokens substantially.",
+        "Make error messages actionable (what to fix) rather than raw tracebacks. Use unambiguous parameter names (`user_id`, not `user`) and make misuse hard (poka-yoke, such as requiring absolute file paths).",
+        "Ask for an explanation or supporting evidence in a parameter, not the model's step-by-step reasoning, which can trigger a `reasoning_extraction` refusal.",
+        "`tool_choice`: `auto` (default with tools), `any` (must call some tool), `tool` (must call named tool), `none`. Forcing a tool prefills the turn, so no text precedes `tool_use`, and skips thinking. Opus 5.5, Sonnet 5.5, Fable 5.1 and Mythos 5.1 reject `any` and `tool` with a 400; use `auto` plus strict tool use or structured outputs.",
+        "Changing `tool_choice` invalidates cached message blocks; changing tool definitions invalidates the whole cache.",
+        "Evaluate tools with realistic multi-step tasks, track accuracy, call counts, runtime, tokens and errors, and read transcripts; small description edits can move results a lot."
+      ],
+      "example": {
+        "title": "A well-described, namespaced tool with examples",
+        "language": "json",
+        "code": "{\n  \"name\": \"orders_get_status\",\n  \"description\": \"Looks up the current fulfilment status of a single customer order by order number. Use it when the customer asks where an order is or whether it shipped. It returns status, carrier and ETA only; it does not return payment details or allow changes to the order. If the order number is not found it returns a message saying so.\",\n  \"input_schema\": {\n    \"type\": \"object\",\n    \"properties\": {\n      \"order_number\": {\"type\": \"string\", \"description\": \"Order number as printed on the receipt, e.g. A-10442\"},\n      \"response_format\": {\"type\": \"string\", \"enum\": [\"concise\", \"detailed\"], \"description\": \"concise returns status and ETA; detailed adds the scan history\"}\n    },\n    \"required\": [\"order_number\"]\n  },\n  \"input_examples\": [\n    {\"order_number\": \"A-10442\"},\n    {\"order_number\": \"B-77120\", \"response_format\": \"detailed\"}\n  ]\n}"
+      },
+      "examTips": [
+        "Tool calls misfire? First fix: improve the description (and add examples), not add more tools.",
+        "Too many overlapping tools confuses selection: consolidate and namespace.",
+        "Tool results should be small and meaningful; dumping whole API payloads wastes context."
+      ],
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools"
+    },
+    {
+      "heading": "Reducing latency: model choice, prompt/output length",
+      "notes": [
+        "Measure first: **baseline latency** (time to process the prompt and generate the full response) and **time to first token (TTFT)**, which matters most with streaming.",
+        "Get a prompt working well first, then optimize latency; premature optimization hides what top quality looks like.",
+        "**Choose a smaller, faster model.** The docs recommend Claude Haiku 5.5 for speed-critical apps; its main speed/cost control is `output_config.effort` (for example `low` is cheapest and fastest). Leave room in `max_tokens` for thinking.",
+        "**Trim tokens**: be clear and concise in the prompt, ask for shorter responses, and set `max_tokens` as a hard cap. Asking for sentence or paragraph limits works better than exact word counts because models count tokens, not words.",
+        "`max_tokens` is a blunt tool: output is cut off mid-sentence when reached, so it suits multiple-choice or short answers where the answer comes first.",
+        "Routing easy requests to a small model and hard ones to a larger model is a workflow-level latency and cost lever."
+      ],
+      "example": {
+        "title": "Fast, cheap summarization call",
+        "language": "python",
+        "code": "message = client.messages.create(\n    model=\"claude-haiku-5-5\",\n    max_tokens=1024,\n    output_config={\"effort\": \"low\"},\n    messages=[{\"role\": \"user\",\n               \"content\": \"Summarize this customer feedback in 2 sentences: [feedback text]\"}],\n)"
+      },
+      "examTips": [
+        "Fastest model + low effort + concise prompt = lowest latency; the exam wants the most direct lever for the scenario.",
+        "Do not set an extremely low max_tokens for open-ended answers; it truncates output instead of making Claude concise."
+      ],
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/reduce-latency"
+    },
+    {
+      "heading": "Streaming and prompt caching",
+      "notes": [
+        "**Streaming** (`stream: true`, server-sent events) lets the model send output before it is complete, improving perceived responsiveness (TTFT) without changing total generation time. Use the SDK stream helpers.",
+        "Event flow: `message_start`, then per content block `content_block_start`, one or more `content_block_delta`, `content_block_stop`, then `message_delta` (stop_reason and usage) and `message_stop`. `ping` events may appear anywhere and `error` events (for example `overloaded_error`) can arrive mid-stream.",
+        "Tool input streams as `input_json_delta` partial JSON strings; accumulate and parse after `content_block_stop`. Text arrives as `text_delta`. Current models emit one complete key/value at a time, so pauses can occur.",
+        "**Prompt caching** lets the API reuse a processed prompt prefix, cutting latency and input cost for repeated content (long system prompts, tool definitions, documents, conversation history). Output generation is unchanged.",
+        "Prefix order is `tools` then `system` then `messages`; the cache covers everything up to and including the marked block. Up to **4 breakpoints** per request. Use top-level automatic `cache_control` for multi-turn chats or explicit `cache_control` on blocks.",
+        "Place the breakpoint on the last block that is identical across requests; do not cache content that changes every call (timestamps, the new user message). Hits need identical content up to the breakpoint, and the lookback is about 20 blocks.",
+        "Pricing relative to base input: 5-minute cache write 1.25x, 1-hour write 2x (set `ttl: \"1h\"`), cache read about 0.1x (lower on some models). The 5-minute TTL refreshes free on each read. Longer-TTL entries must precede shorter ones.",
+        "Minimum cacheable length varies by model (from 512 up to 4,096 tokens); shorter prompts are silently not cached. If `cache_creation_input_tokens` and `cache_read_input_tokens` are both 0, caching did not happen.",
+        "Total input = `cache_read_input_tokens` + `cache_creation_input_tokens` + `input_tokens` (the last counts only tokens after the final breakpoint).",
+        "Invalidation: changing tool definitions invalidates everything; system changes (including citations or web search toggles) invalidate system and messages; changes to `tool_choice`, images, thinking config or `output_config.effort` invalidate message blocks. A cache entry is available only after the first response starts, so wait before sending parallel requests that should hit it.",
+        "Pre-warming: a request with `max_tokens: 0` and a breakpoint writes the cache without generating output (not allowed with streaming, thinking, structured outputs, forced tool_choice, or inside a batch)."
+      ],
+      "example": {
+        "title": "Cache a large document in the system prompt and stream the answer",
+        "language": "python",
+        "code": "with client.messages.stream(\n    model=\"claude-sonnet-5-5\",\n    max_tokens=1024,\n    system=[\n        {\"type\": \"text\", \"text\": \"You analyze legal agreements.\"},\n        {\"type\": \"text\",\n         \"text\": \"Full agreement text: [...]\",\n         \"cache_control\": {\"type\": \"ephemeral\"}},   # cache everything up to here\n    ],\n    messages=[{\"role\": \"user\", \"content\": \"Summarize the termination clause.\"}],\n) as stream:\n    for text in stream.text_stream:\n        print(text, end=\"\", flush=True)\n    final = stream.get_final_message()\n    print(final.usage.cache_read_input_tokens)"
+      },
+      "examTips": [
+        "Streaming improves perceived latency (TTFT), not total compute. Caching reduces real latency and cost for repeated prefixes.",
+        "Put stable content first (tools, system, documents) and variable content last, or the cache never hits.",
+        "Repeated long prefix across many calls = caching. Perceived wait in a chat UI = streaming. Both can be combined."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-caching"
+    },
+    {
+      "heading": "Batch processing (Message Batches API)",
+      "notes": [
+        "The Message Batches API processes large volumes of Messages requests **asynchronously at 50% lower cost** with higher throughput. Use it when you do not need an immediate response: evaluations, bulk classification, content moderation backfills, document analysis.",
+        "Limits: a batch holds up to **100,000 requests or 256 MB**, whichever is reached first. Most batches finish within 1 hour; batches **expire after 24 hours**. Results are downloadable for **29 days** after creation.",
+        "Each request needs a unique `custom_id` (1-64 characters, alphanumeric, hyphen or underscore) and standard `params`. Results can come back in any order, so match by `custom_id`.",
+        "Per-request result types: `succeeded`, `errored` (invalid request or server error; not billed), `canceled` and `expired` (not billed). You can cancel a batch in progress.",
+        "Batches are not for latency-sensitive or interactive features. They combine with prompt caching (shared prefixes) and are compatible with citations and token counting; pre-warming requests (`max_tokens: 0`) are not allowed inside batches.",
+        "Batch results are not eligible for zero data retention (29-day retention, async storage required)."
+      ],
+      "example": {
+        "title": "Create a batch and read results",
+        "language": "python",
+        "code": "batch = client.messages.batches.create(requests=[\n    {\"custom_id\": \"ticket-001\",\n     \"params\": {\"model\": \"claude-haiku-5-5\", \"max_tokens\": 256,\n                \"messages\": [{\"role\": \"user\", \"content\": \"Classify: ...\"}]}},\n    {\"custom_id\": \"ticket-002\",\n     \"params\": {\"model\": \"claude-haiku-5-5\", \"max_tokens\": 256,\n                \"messages\": [{\"role\": \"user\", \"content\": \"Classify: ...\"}]}},\n])\n# poll until batch.processing_status == \"ended\", then:\nfor result in client.messages.batches.results(batch.id):\n    match result.result.type:\n        case \"succeeded\": print(result.custom_id, result.result.message.content)\n        case \"errored\" | \"expired\" | \"canceled\": print(result.custom_id, result.result.type)"
+      },
+      "examTips": [
+        "Overnight/bulk, no user waiting = batch (50% cheaper). User waiting = streaming/real-time.",
+        "Do not assume results are in submission order; use `custom_id`.",
+        "Errored, canceled and expired requests are not billed."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/batch-processing"
+    },
+    {
+      "heading": "Structured outputs",
+      "notes": [
+        "Structured outputs constrain Claude to a JSON schema so responses are valid and schema-compliant. Two parts: **JSON outputs** (`output_config.format` with `type: json_schema`) control what Claude says; **strict tool use** (`strict: true`) guarantees tool names and inputs match your schema. They can be combined.",
+        "The JSON comes back in a normal text content block. In Python, `client.messages.parse()` with a Pydantic model returns `parsed_output`; TypeScript has `zodOutputFormat()`.",
+        "Schema rules: objects need `additionalProperties: false`; supported types include enum (scalar), const, anyOf/allOf, internal $ref, string formats, and `minItems` of 0 or 1. Not supported: recursive schemas, numeric constraints (`minimum`, `maximum`), string length constraints, external $ref. Unsupported features return a 400.",
+        "Edge cases: `stop_reason: \"refusal\"` returns 200, is billed and may not match the schema; `stop_reason: \"max_tokens\"` may give incomplete JSON (retry with a larger `max_tokens`).",
+        "First use with a schema has extra compile latency; compiled grammars are cached for 24 hours. Structure changes invalidate that cache; changing only `name` or `description` does not. Changing `output_config.format` invalidates the prompt cache for the thread.",
+        "Complexity limits: 20 strict tools per request, 24 optional parameters total, 16 union-typed parameters. Too complex returns a 400; reduce by marking only critical tools strict, flattening, or splitting work.",
+        "`output_format` and the beta header are deprecated; use `output_config.format`. Structured outputs replace prefill-style tricks on models where prefill is removed.",
+        "**Not compatible with citations** (400 error). Compatible with batch processing and token counting.",
+        "Forced `tool_choice` is rejected on some current models; use `auto` with strict tools, or structured outputs, to get guaranteed shapes."
+      ],
+      "example": {
+        "title": "Extract a contact record as guaranteed JSON",
+        "language": "python",
+        "code": "from pydantic import BaseModel\n\nclass ContactInfo(BaseModel):\n    name: str\n    email: str\n    plan_interest: str\n    demo_requested: bool\n\nresponse = client.messages.parse(\n    model=\"claude-opus-5-5\",\n    max_tokens=1024,\n    messages=[{\"role\": \"user\", \"content\":\n      \"Extract the key information: John Smith (john@example.com) wants a demo of Enterprise next Tuesday.\"}],\n    output_format=ContactInfo,\n)\nprint(response.parsed_output)"
+      },
+      "examTips": [
+        "Downstream code needs parseable JSON every time = structured outputs, not 'please reply in JSON'.",
+        "Need guaranteed tool arguments = `strict: true`. Need a guaranteed response shape = `output_config.format`.",
+        "Always check stop_reason for refusal and max_tokens even with structured outputs.",
+        "Citations + structured outputs together = 400 error."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/structured-outputs"
+    },
+    {
+      "heading": "Reducing hallucinations",
+      "notes": [
+        "Hallucination is generated text that is factually wrong or inconsistent with the provided context. These techniques reduce it significantly but do not eliminate it; validate high-stakes output.",
+        "**Allow Claude to say 'I don't know'**: explicitly give permission to admit uncertainty or say the source lacks the information. This can drastically cut false statements.",
+        "**Ground in direct quotes**: for long documents (over about 20k tokens), first ask Claude to extract word-for-word relevant quotes, then do the task based only on those quotes.",
+        "**Verify with citations**: make each claim auditable; after drafting, have Claude find a supporting quote for every claim and retract (remove) any it cannot support. Or use the Citations / search results features for API-level attribution.",
+        "**Restrict external knowledge**: instruct Claude to use only the provided documents, not general knowledge.",
+        "Advanced: review summarized thinking blocks to find faulty reasoning; **best-of-N** (run the same prompt several times and compare; inconsistency signals hallucination); **iterative refinement** (feed the output back and ask Claude to verify or expand).",
+        "Tool design helps too: natural-language identifiers in tool results reduce hallucinated references compared with opaque IDs."
+      ],
+      "example": {
+        "title": "Quote-first, grounded analysis prompt",
+        "language": "text",
+        "code": "Review this privacy policy for GDPR compliance.\n<policy>{{POLICY}}</policy>\n\n1. Extract exact quotes from the policy most relevant to GDPR. If you can't find relevant quotes, state \"No relevant quotes found.\"\n2. Using only those quotes (reference them by number), analyze compliance.\n   If the policy lacks information, say \"I don't have enough information to confidently assess this.\""
+      },
+      "examTips": [
+        "Best first fixes: permission to say 'I don't know', quotes before analysis, restrict to provided documents, require supporting citations.",
+        "Lowering temperature is not the documented answer (sampling params are unsupported on current models).",
+        "Best-of-N is a detection technique (compare consistency), not a guarantee of correctness."
+      ],
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/reduce-hallucinations"
+    },
+    {
+      "heading": "Use-case guides: routing, support chat, moderation, legal summarization",
+      "notes": [
+        "Anthropic publishes production guides for **ticket routing**, **customer support agent**, **content moderation**, **legal summarization**, and a **commerce agent** blueprint. Each follows: decide if an LLM fits, define success criteria, choose a model, build the prompt, evaluate, then improve and deploy.",
+        "**Ticket routing / classification**: use Claude over traditional ML when labeled data is limited, categories change, inputs are unstructured, rules are semantic, or you want explanations and multilingual support. For 20+ categories use a taxonomic hierarchy; for highly variable tickets use vector search to retrieve similar examples; plan for edge cases and escalation. Measure routing accuracy and escalation rate.",
+        "**Customer support agent**: break the interaction into tasks (Q&A, retrieval, actions), use a system prompt for role/tone and staying on topic, RAG for product knowledge, tool use for actions (such as generating quotes), and measure escalation efficiency (correctly handing off to humans). Streaming helps the chat UI feel responsive.",
+        "**Content moderation**: use a small fast model such as Haiku for volume (the guide's cost estimate for 1B posts/month is roughly $3.6k with Haiku vs $180k with Opus). Define each category with a clear definition (bare names are not enough), return JSON verdicts (violation, categories, explanation), consider risk levels (0-3) for graduated actions, and send borderline items to human review. Evaluate precision and recall on labeled sets. Batching many messages with IDs in one prompt, or the Batches API, cuts cost when real time is not needed.",
+        "**Legal summarization**: accuracy matters, so choose a stronger model (Opus-class) unless cost dictates Haiku; extract defined metadata fields; for documents longer than the context window use **meta-summarization** (summarize chunks, then summarize the summaries); use summary-indexed documents to explore large collections; evaluate with metrics such as ROUGE and human review.",
+        "Common thread: match model size to accuracy/volume needs, use structured output for machine-consumed results, ground in documents, and keep a human in the loop for high-stakes decisions."
+      ],
+      "example": {
+        "title": "Moderation verdict schema (graduated risk)",
+        "language": "json",
+        "code": "{\n  \"risk_level\": 2,\n  \"categories\": [\"Specialized Advice\"],\n  \"explanation\": \"Presents investment advice as certain without qualification.\"\n}\n// 0 = allow, 1 = allow + log, 2 = human review, 3 = auto-block"
+      },
+      "examTips": [
+        "High-volume, simple classification = small model (Haiku) + structured output + caching of instructions.",
+        "High-accuracy legal/medical style summarization = stronger model, quote grounding, human review.",
+        "Document longer than context = chunk and meta-summarize.",
+        "Policy changes in moderation are handled by editing the prompt, not retraining a model."
+      ],
+      "source": "https://platform.claude.com/docs/en/about-claude/use-case-guides/overview"
+    }
+  ],
+  "keyTakeaways": [
+    "Workflows follow predefined code paths; agents direct their own tool use. Start with the simplest design and add complexity only when it measurably helps.",
+    "The Messages API is stateless: resend the full message history (including tool_use and tool_result turns) on every request.",
+    "Prefill and temperature/top_p/top_k are not available on current models; use structured outputs and prompting instead.",
+    "Search result blocks (source, title, content, citations.enabled) give RAG answers per-claim citations; Citations on documents use char (0-indexed), page (1-indexed) or block indices.",
+    "Citations cannot be combined with structured outputs (400 error).",
+    "Tool descriptions matter most: say what, when, when not, parameters and caveats; consolidate, namespace, and return high-signal results.",
+    "Latency levers: faster model (Haiku 5.5 with low effort), shorter prompts/outputs, streaming (perceived latency), prompt caching (repeated prefixes).",
+    "Prompt caching: order tools, system, messages; up to 4 breakpoints; 5-minute write 1.25x, 1-hour write 2x, read about 0.1x; stable content first.",
+    "Message Batches API: 50% cheaper, up to 100,000 requests or 256 MB, most finish under 1 hour, expire at 24 hours, results kept 29 days, match by custom_id.",
+    "Structured outputs: output_config.format for JSON replies, strict: true for tool inputs; still check stop_reason for refusal and max_tokens.",
+    "Reduce hallucinations by allowing 'I don't know', extracting quotes first, citing and retracting unsupported claims, and restricting to provided documents.",
+    "Use-case guides: small model for volume classification/moderation, strong model plus meta-summarization for legal documents, human escalation for support."
+  ],
+  "glossary": [
+    {"term": "Workflow", "definition": "An LLM application orchestrated through predefined code paths."},
+    {"term": "Agent", "definition": "A system where the LLM dynamically directs its own process and tool use, looping on environment feedback."},
+    {"term": "Augmented LLM", "definition": "A model combined with retrieval, tools and memory."},
+    {"term": "Prompt chaining", "definition": "Sequential LLM steps with optional programmatic gates between them."},
+    {"term": "Routing", "definition": "Classifying input and sending it to a specialized prompt or model."},
+    {"term": "Orchestrator-workers", "definition": "A central LLM breaks a task into dynamic subtasks, delegates to workers and synthesizes results."},
+    {"term": "Evaluator-optimizer", "definition": "One LLM generates and another critiques in a loop until criteria are met."},
+    {"term": "Stateless API", "definition": "Each request is independent; the client must send full conversation context every time."},
+    {"term": "RAG", "definition": "Retrieval-augmented generation: fetch relevant content and supply it to the model to ground answers."},
+    {"term": "search_result block", "definition": "Content block with source, title and text content that lets Claude cite your retrieved passages."},
+    {"term": "Citations", "definition": "Feature returning the exact source passages and locations supporting each claim in a response."},
+    {"term": "TTFT", "definition": "Time to first token; the delay before the first response token arrives."},
+    {"term": "Streaming (SSE)", "definition": "Receiving response events incrementally as they are generated."},
+    {"term": "Prompt caching", "definition": "Reusing a processed prompt prefix marked with cache_control to reduce latency and cost."},
+    {"term": "Cache breakpoint", "definition": "A cache_control marker; the cache covers the prompt up to and including that block (max 4)."},
+    {"term": "Message Batches API", "definition": "Asynchronous bulk Messages processing at a 50% discount."},
+    {"term": "custom_id", "definition": "Unique identifier per batch request used to match results, which may return in any order."},
+    {"term": "Structured outputs", "definition": "Schema-constrained JSON responses (output_config.format) and strict tool inputs."},
+    {"term": "Strict tool use", "definition": "Setting strict: true on a tool so inputs are guaranteed to match its schema."},
+    {"term": "Hallucination", "definition": "Generated content that is incorrect or not supported by the provided context."},
+    {"term": "Meta-summarization", "definition": "Summarizing chunks of a long document and then summarizing those summaries."},
+    {"term": "tool_choice", "definition": "Parameter controlling tool use: auto, any, tool or none."}
+  ],
+  "quiz": [
+    {
+      "q": "A team needs to turn each incoming invoice into a fixed sequence: extract fields, validate totals, then draft a summary. Steps never change. Which architecture fits best?",
+      "options": ["A fully autonomous agent that decides its own steps", "A prompt-chaining workflow with a programmatic validation gate", "An orchestrator-workers system with dynamic subtasks", "An evaluator-optimizer loop with no stopping condition"],
+      "answer": 1,
+      "explanation": "Known, fixed steps suit a workflow, and prompt chaining with gates trades a bit of latency for accuracy. Agents and orchestrator-workers are for unpredictable steps; an unbounded loop lacks a stopping condition.",
+      "source": "https://www.anthropic.com/engineering/building-effective-agents"
+    },
+    {
+      "q": "A multi-file code change tool cannot know in advance which files need edits. Which pattern best fits?",
+      "options": ["Routing", "Sectioning parallelization with fixed subtasks", "Orchestrator-workers", "Voting parallelization"],
+      "answer": 2,
+      "explanation": "Orchestrator-workers lets a central LLM decide subtasks dynamically and delegate. Sectioning and voting use predefined subtasks or repeated identical tasks; routing only classifies and dispatches.",
+      "source": "https://www.anthropic.com/engineering/building-effective-agents"
+    },
+    {
+      "q": "A chatbot answers the second question as though the first never happened. The developer sends only the latest user message each time. What is the correct fix?",
+      "options": ["Increase max_tokens", "Resend the full prior user and assistant messages with each request", "Set a lower temperature", "Prefill the assistant turn with a greeting"],
+      "answer": 1,
+      "explanation": "The Messages API is stateless, so the client must include the conversation history in every request. max_tokens and temperature do not add memory, and prefill is unsupported on current models.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/working-with-messages"
+    },
+    {
+      "q": "A support bot retrieves help-center snippets from your own vector database through a custom tool. You want each answer sentence attributed to the snippet's URL. What should the tool return?",
+      "options": ["Plain strings joined together, asking Claude to mention URLs", "search_result blocks with source, title, content and citations enabled", "An image of each article", "A document block with citations disabled"],
+      "answer": 1,
+      "explanation": "search_result content blocks returned in a tool_result, with citations enabled, give natural per-claim citations carrying your source and title. Plain strings give no structured citation; images are not supported in search results; disabled citations produce none.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/search-results"
+    },
+    {
+      "q": "A developer enables citations on uploaded documents and also sets output_config.format to a JSON schema in the same request. What happens?",
+      "options": ["Claude returns schema-valid JSON with embedded citations", "The API returns a 400 error", "Citations are silently ignored", "The schema is ignored"],
+      "answer": 1,
+      "explanation": "Citations and structured outputs are incompatible because citations interleave blocks with text; the combination returns a 400 error.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/citations"
+    },
+    {
+      "q": "A tool-using agent keeps picking the wrong tool among create_pr, review_pr and merge_pr, and misreads parameters. Which change is most aligned with Anthropic's guidance?",
+      "options": ["Shorten all descriptions to one line", "Consolidate into one tool with an action parameter and write detailed descriptions with examples", "Force tool_choice to 'any' on every request", "Return raw database IDs so results are compact"],
+      "answer": 1,
+      "explanation": "Detailed descriptions are the most important factor, and consolidating related operations reduces selection ambiguity. Short descriptions hurt, forcing any tool does not fix selection (and is rejected on some models), and opaque IDs reduce clarity.",
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools"
+    },
+    {
+      "q": "A chat UI feels slow because users stare at a blank screen until the whole answer is generated. Which technique most directly improves perceived responsiveness?",
+      "options": ["Message Batches API", "Streaming the response", "Raising max_tokens", "Using citations"],
+      "answer": 1,
+      "explanation": "Streaming sends tokens as generated, lowering time to first token for the user. Batches are asynchronous and slower to return; larger max_tokens does not speed output; citations are unrelated.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/streaming"
+    },
+    {
+      "q": "An app sends a 30,000-token policy document as context on every request, but cache_read_input_tokens is always 0 and cache_creation_input_tokens is high. Which is the most likely cause?",
+      "options": ["The cache_control breakpoint is on a block that changes each request, such as a timestamp", "Prompt caching only works with batches", "The document is too long to cache", "Streaming is enabled"],
+      "answer": 0,
+      "explanation": "Cache hits need identical content up to the breakpoint; putting the breakpoint after (or on) per-request changing content, or including a timestamp earlier in the prefix, forces a fresh write each time. A 30k document is well above cache minimums, and streaming does not prevent caching.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-caching"
+    },
+    {
+      "q": "A nightly job must classify 80,000 support tickets; results are needed by morning and cost matters most. Which approach is best?",
+      "options": ["80,000 real-time requests with streaming", "Message Batches API with a custom_id per ticket", "One request containing every ticket", "Prefill each response"],
+      "answer": 1,
+      "explanation": "The Batches API gives 50% lower cost for non-urgent bulk work and fits within 100,000 requests per batch; results are matched by custom_id. Real-time streaming costs more, a single giant request exceeds practical limits, and prefill is unsupported on current models.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/batch-processing"
+    },
+    {
+      "q": "When reading batch results, a developer assumes results appear in the same order as submitted and mismatches records. What should they do?",
+      "options": ["Sort by token count", "Match each result to its request by custom_id", "Resubmit one request at a time", "Use the 29-day retention to reorder"],
+      "answer": 1,
+      "explanation": "Batch results can return in any order; custom_id is the identifier for matching. The other options do not address ordering.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/batch-processing"
+    },
+    {
+      "q": "A pipeline parses Claude's reply with json.loads and occasionally crashes on malformed output. Which is the most robust fix on current models?",
+      "options": ["Add 'respond in JSON' in capitals to the prompt", "Use output_config.format with a JSON schema (structured outputs)", "Prefill the assistant turn with an opening brace", "Lower the temperature to 0"],
+      "answer": 1,
+      "explanation": "Structured outputs constrain the response to a schema. Prompt-only instructions are not guaranteed; prefill is unsupported on Claude 4.6+ (400) and sampling parameters like temperature are unsupported on current models.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/structured-outputs"
+    },
+    {
+      "q": "With structured outputs enabled, a response arrives with stop_reason 'max_tokens'. What is true?",
+      "options": ["The JSON is guaranteed valid and complete", "The output may be incomplete; retry with a higher max_tokens", "The schema was ignored", "The request is not billed"],
+      "answer": 1,
+      "explanation": "Structured outputs guarantee schema compliance only when generation completes; hitting max_tokens can truncate the JSON. Refusals are a separate stop_reason that is billed and may not match the schema.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/structured-outputs"
+    },
+    {
+      "q": "A contract-review assistant occasionally states clauses that are not in the 80-page contract. Which combination best reduces this?",
+      "options": ["Tell Claude to use general legal knowledge when unsure", "Ask Claude to extract word-for-word quotes first, answer only from them, and say 'I don't have enough information' when quotes are missing", "Raise max_tokens", "Ask for longer answers"],
+      "answer": 1,
+      "explanation": "Quote grounding on long documents, restricting to provided text, and giving permission to admit uncertainty are the documented basic strategies. Allowing general knowledge increases hallucination risk; length changes do not help.",
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/reduce-hallucinations"
+    },
+    {
+      "q": "You are building a content-moderation system handling very high volume with simple category decisions and a limited budget. Which design matches Anthropic's use-case guidance?",
+      "options": ["Largest model, free-text verdicts", "Small fast model (such as Haiku) with defined categories, JSON verdicts, and human review for borderline cases", "No category definitions; rely on category names alone", "One request per word"],
+      "answer": 1,
+      "explanation": "The moderation guide recommends a small, fast model for volume, clear category definitions (bare names are insufficient), structured JSON verdicts, and risk levels with human review for ambiguous cases. The largest model is far more costly for simple decisions.",
+      "source": "https://platform.claude.com/docs/en/about-claude/use-case-guides/content-moderation"
+    },
+    {
+      "q": "A legal team must summarize a document longer than the model's context window. Which technique does Anthropic's legal summarization guide recommend?",
+      "options": ["Truncate to the first pages", "Meta-summarization: summarize chunks, then summarize the summaries", "Ask for a one-word summary", "Disable citations and retry"],
+      "answer": 1,
+      "explanation": "Meta-summarization chunks the document, summarizes each chunk, then combines those summaries into a final summary. Truncation loses content and the other options do not address context length.",
+      "source": "https://platform.claude.com/docs/en/about-claude/use-case-guides/legal-summarization"
+    }
+  ]
+}

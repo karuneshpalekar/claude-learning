@@ -1,0 +1,643 @@
+{
+  "slug": "mcp-dev",
+  "title": "MCP Dev",
+  "overview": "The Model Context Protocol (MCP) is the open standard that connects AI applications to tools, data and prompts. This objective covers the host/client/server architecture, primitives, transports, JSON-RPC lifecycle and capabilities (both the legacy handshake and the stateless 2026-07-28 revision), building servers, OAuth authorization, the Inspector, wiring servers into Claude Code, Claude Desktop and the Messages API, and security. The exam favors practical scenarios: picking the right primitive, transport, scope or fix.",
+  "sources": [
+    {
+      "title": "MCP Architecture overview",
+      "url": "https://modelcontextprotocol.io/docs/learn/architecture"
+    },
+    {
+      "title": "MCP Transports (spec, latest)",
+      "url": "https://modelcontextprotocol.io/specification/latest/basic/transports"
+    },
+    {
+      "title": "MCP Streamable HTTP transport",
+      "url": "https://modelcontextprotocol.io/specification/latest/basic/transports/streamable-http"
+    },
+    {
+      "title": "MCP stdio transport",
+      "url": "https://modelcontextprotocol.io/specification/latest/basic/transports/stdio"
+    },
+    {
+      "title": "MCP Lifecycle (2025-11-25)",
+      "url": "https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle"
+    },
+    {
+      "title": "MCP Versioning and Compatibility (2026-07-28)",
+      "url": "https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning"
+    },
+    {
+      "title": "Build an MCP server",
+      "url": "https://modelcontextprotocol.io/docs/develop/build-server"
+    },
+    {
+      "title": "MCP Authorization",
+      "url": "https://modelcontextprotocol.io/specification/latest/basic/authorization"
+    },
+    {
+      "title": "MCP Inspector",
+      "url": "https://modelcontextprotocol.io/docs/tools/inspector"
+    },
+    {
+      "title": "MCP Security Best Practices",
+      "url": "https://modelcontextprotocol.io/docs/tutorials/security/security_best_practices"
+    },
+    {
+      "title": "Connect Claude Code to MCP servers",
+      "url": "https://code.claude.com/docs/en/mcp"
+    },
+    {
+      "title": "MCP connector (Messages API)",
+      "url": "https://platform.claude.com/docs/en/agents-and-tools/mcp-connector"
+    }
+  ],
+  "sections": [
+    {
+      "heading": "Architecture: host, client, server",
+      "notes": [
+        "MCP is a client-server protocol. The **host** is the AI application (Claude Code, Claude Desktop, VS Code). The host creates **one MCP client per MCP server**; each client keeps a dedicated connection to its server.",
+        "The **server** is any program that provides context to clients, wherever it runs. A server launched as a local subprocess over stdio is called a 'local' server; one reached over Streamable HTTP is 'remote'. Local stdio servers typically serve one client; remote servers typically serve many.",
+        "MCP has two layers. The **data layer** is JSON-RPC 2.0 messages (primitives, notifications, capability and version discovery). The **transport layer** carries those messages (connection setup, framing, authorization). The same JSON-RPC format is used on every transport.",
+        "MCP only standardizes context exchange. It does not dictate how the host uses an LLM or manages the context it receives.",
+        "Tool results come back as a `content` array (for example `{type: text, text: ...}` blocks), so a single result can hold multiple content types."
+      ],
+      "examTips": [
+        "Know the vocabulary exactly: the host owns many clients; a client talks to exactly one server. 'The client is the application' is a trap answer.",
+        "'Local vs remote' describes where the server runs/transport, not a different protocol.",
+        "MCP does not decide which tool the model calls; the host and the model do."
+      ],
+      "source": "https://modelcontextprotocol.io/docs/learn/architecture",
+      "example": {
+        "title": "Host/client/server mapping",
+        "language": "text",
+        "code": "Claude Code (MCP host)\n ├─ MCP client 1 <--stdio-------------> filesystem server (local subprocess)\n ├─ MCP client 2 <--Streamable HTTP---> Sentry server (remote)\n └─ MCP client 3 <--Streamable HTTP---> Notion server (remote)\n\nOne client per server. The host aggregates tools from all clients for the model."
+      }
+    },
+    {
+      "heading": "Server primitives: tools, resources, prompts",
+      "notes": [
+        "Servers expose three core primitives. **Tools** are executable functions the model can invoke (API calls, DB queries, file ops). **Resources** are data sources that supply context (file contents, DB schema, API responses). **Prompts** are reusable templates that structure interactions (system prompts, few-shot examples).",
+        "Each primitive has discovery methods (`tools/list`, `resources/list`, `prompts/list`), retrieval (`resources/read`, `prompts/get`) and, for tools only, execution (`tools/call`). Listings can be dynamic, and large lists support a `cursor` for pagination.",
+        "A tool definition has `name` (unique id), `title` (display name), `description` (what it does and when to use it) and `inputSchema` (JSON Schema for arguments). Good descriptions and schemas are how the model decides when and how to call the tool.",
+        "Typical control model from the docs: tools are model-invoked (with user approval in the host), resources are application/context data, prompts are user-selected templates.",
+        "Servers can notify clients when lists change (for example `notifications/tools/list_changed`) when they advertise `listChanged`."
+      ],
+      "examTips": [
+        "Scenario cue: 'expose a DB schema as read-only context' -> resource; 'let the model run a query' -> tool; 'canned few-shot template the user picks' -> prompt.",
+        "Only tools are executed (`tools/call`); resources are read and prompts are fetched.",
+        "Tool `name` must match exactly what `tools/list` returned."
+      ],
+      "source": "https://modelcontextprotocol.io/docs/learn/architecture",
+      "example": {
+        "title": "tools/list and tools/call",
+        "language": "json",
+        "code": "{\n  \"jsonrpc\": \"2.0\", \"id\": 3, \"method\": \"tools/call\",\n  \"params\": {\n    \"name\": \"weather_current\",\n    \"arguments\": {\"location\": \"San Francisco\", \"units\": \"imperial\"}\n  }\n}\n// result\n{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"68F, partly cloudy\"}]}}"
+      }
+    },
+    {
+      "heading": "Client primitives: elicitation, sampling, roots",
+      "notes": [
+        "Clients can expose features back to servers. **Elicitation** lets a server ask the user for more input or confirmation (`elicitation/create`).",
+        "**Sampling** lets a server request an LLM completion from the client's model (`sampling/createMessage`), so the server stays model-independent and needs no LLM SDK. As of protocol version `2026-07-28` sampling is **deprecated**; the docs say new implementations should call LLM provider APIs directly. Logging notifications are likewise deprecated in favour of stderr (stdio) or OpenTelemetry.",
+        "**Roots** are filesystem locations a client can expose to servers (clients advertise a `roots` capability, with `listChanged` for updates).",
+        "In the 2026-07-28 revision, servers no longer send their own JSON-RPC requests. When a server needs elicitation, sampling or roots, it returns an `InputRequiredResult` containing `inputRequests`, and the client retries the original request with matching `inputResponses`. This is the **Multi Round-Trip Requests (MRTR)** pattern.",
+        "In 2025-era (legacy) revisions, the server could send these as separate requests to the client during a session."
+      ],
+      "examTips": [
+        "Know which direction: tools/resources/prompts are SERVER primitives; elicitation/sampling/roots are CLIENT-offered features.",
+        "Sampling is deprecated in 2026-07-28; a question asking the current recommended way for a server to get model output points to calling an LLM API directly.",
+        "A client must declare a capability (for example `elicitation`) before a server may rely on it."
+      ],
+      "source": "https://modelcontextprotocol.io/docs/learn/architecture",
+      "example": {
+        "title": "MRTR flow (2026-07-28)",
+        "language": "text",
+        "code": "Client -> Server: tools/call (id 1)\nServer -> Client: InputRequiredResult { inputRequests: elicitation/create ... }\nClient: asks the user, collects answer\nClient -> Server: tools/call (id 2) = original params + inputResponses\nServer -> Client: final result"
+      }
+    },
+    {
+      "heading": "Transports: stdio, Streamable HTTP, SSE deprecation",
+      "notes": [
+        "Two standard transports. **stdio**: the client launches the server as a subprocess; messages are newline-delimited JSON-RPC over stdin/stdout and must not contain embedded newlines. Best for local servers, no network overhead.",
+        "**Streamable HTTP**: the server exposes a single MCP endpoint (for example `https://example.com/mcp`) that accepts POST. Each JSON-RPC message from the client is its own POST with `Accept: application/json, text/event-stream`. The server replies with either one JSON object or a request-scoped SSE stream carrying notifications then the final response. A notification POST gets `202 Accepted`.",
+        "Revision 2026-07-28 changed Streamable HTTP: protocol-level sessions and the standalone GET stream were removed. Long-lived change notifications now arrive on the response stream of a `subscriptions/listen` request. Every POST needs `MCP-Protocol-Version`, plus `Mcp-Method` (and `Mcp-Name` for tools/call, resources/read, prompts/get) headers that must match the body or the server returns 400 `HeaderMismatch` (-32020).",
+        "Earlier revisions (2025-03-26 to 2025-11-25) used `Mcp-Session-Id` sessions, GET SSE streams and resumable streams via `Last-Event-ID`. A 2026-only server answers GET/DELETE with 405 and ignores `Mcp-Session-Id`.",
+        "The older **HTTP+SSE transport (2024-11-05) is deprecated** (since 2025-03-26). New implementations should not adopt it; migrate to Streamable HTTP. Clients wanting to support old servers POST first, and on 400/404/405 without a modern JSON-RPC error body, issue a GET expecting an SSE `endpoint` event.",
+        "Cancellation differs: on stdio the client sends `notifications/cancelled`; on Streamable HTTP closing the response stream cancels the request.",
+        "Streamable HTTP security: servers MUST validate the `Origin` header (invalid -> 403) to stop DNS rebinding, SHOULD bind to 127.0.0.1 when local, and SHOULD authenticate connections."
+      ],
+      "examTips": [
+        "SSE as the standalone remote transport is deprecated; Streamable HTTP is the replacement. Streamable HTTP can still STREAM using SSE inside a response, so do not confuse the two.",
+        "stdio = local subprocess, one client. Streamable HTTP = remote, many clients, supports standard auth (OAuth recommended).",
+        "Local HTTP servers: bind to localhost, validate Origin, require auth.",
+        "Claude Code docs also mark `--transport sse` as deprecated: use `http` where available."
+      ],
+      "source": "https://modelcontextprotocol.io/specification/latest/basic/transports/streamable-http",
+      "example": {
+        "title": "Streamable HTTP tools/call request (2026-07-28)",
+        "language": "text",
+        "code": "POST /mcp HTTP/1.1\nContent-Type: application/json\nAccept: application/json, text/event-stream\nMCP-Protocol-Version: 2026-07-28\nMcp-Method: tools/call\nMcp-Name: get_weather\n\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_weather\",\"arguments\":{\"location\":\"Seattle, WA\"},\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientCapabilities\":{}}}}"
+      }
+    },
+    {
+      "heading": "JSON-RPC lifecycle and capability negotiation",
+      "notes": [
+        "MCP messages are JSON-RPC 2.0: requests (have `id`, expect a response), responses (`result` or `error`), and notifications (no `id`, no response).",
+        "**Legacy lifecycle (2025-11-25 and earlier)**: 1) client sends `initialize` with `protocolVersion`, `capabilities`, `clientInfo`; 2) server replies with its chosen `protocolVersion`, `capabilities`, `serverInfo` (and optional `instructions`); 3) client sends `notifications/initialized`; then normal operation; then shutdown by closing the transport. Only capabilities negotiated at init may be used.",
+        "Legacy version negotiation: client sends its latest supported version; if the server supports it, it echoes it, otherwise it returns another version it supports; if the client cannot use it, it should disconnect. On HTTP the client then sends `MCP-Protocol-Version` on every request.",
+        "**Capabilities**: client `roots`, `sampling`, `elicitation`, `tasks`, `experimental`; server `prompts`, `resources`, `tools`, `logging`, `completions`, `tasks`, `experimental`. Sub-flags: `listChanged` (prompts/resources/tools), `subscribe` (resources only).",
+        "**Modern lifecycle (2026-07-28)**: MCP is stateless with no handshake. Every request carries `_meta` fields `io.modelcontextprotocol/protocolVersion`, `.../clientCapabilities` and (normally) `.../clientInfo`. Servers MUST implement `server/discover`, which returns `supportedVersions`, `capabilities`, serverInfo and caching hints (`ttlMs`, `cacheScope`); clients MAY call it first. An unsupported version yields `UnsupportedProtocolVersionError` (-32022) listing supported versions, and the client retries.",
+        "Dual-era clients probe a server: on stdio send `server/discover` and fall back to `initialize` on a non-modern error or timeout; on HTTP try a modern request and inspect the 400 body. Modern clients cannot talk to legacy-only servers.",
+        "Change notifications are opt-in via `subscriptions/listen` (filters like `toolsListChanged`); the server acknowledges with `notifications/subscriptions/acknowledged`.",
+        "Optional extensions (for example Tasks, MCP Apps) are negotiated through an `extensions` map inside capabilities. Implementations should set timeouts and cancel requests that time out."
+      ],
+      "examTips": [
+        "Order matters in the legacy flow: initialize request -> response -> initialized notification. Notifications have no `id`.",
+        "Capabilities gate features: if the server did not declare `tools`, the client must not call `tools/list`.",
+        "`subscribe` applies to resources only; `listChanged` applies to prompts, resources and tools.",
+        "Exam may test either era. Key contrast: legacy = handshake + session; 2026-07-28 = stateless, per-request `_meta`, optional `server/discover`."
+      ],
+      "source": "https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle",
+      "example": {
+        "title": "Legacy initialize handshake",
+        "language": "json",
+        "code": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{\"roots\":{\"listChanged\":true},\"sampling\":{},\"elicitation\":{}},\"clientInfo\":{\"name\":\"ExampleClient\",\"version\":\"1.0.0\"}}}\n// server result: {\"protocolVersion\":\"2025-11-25\",\"capabilities\":{\"tools\":{\"listChanged\":true},\"resources\":{\"subscribe\":true}},\"serverInfo\":{...}}\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}"
+      }
+    },
+    {
+      "heading": "Building servers with the Python and TypeScript SDKs",
+      "notes": [
+        "Official quickstart builds a weather server with two tools, `get_alerts` and `get_forecast`. Servers can also offer resources and prompts, but the tutorial focuses on tools.",
+        "**Python**: requires Python 3.10+ and Python MCP SDK 2.0.0+. Create `MCPServer(\"weather\")` from `mcp.server`, register tools with `@mcp.tool()` (type hints and docstrings generate the tool schema), and start with `mcp.run(transport=\"stdio\")`. Run with `uv run weather.py`.",
+        "**TypeScript**: import `McpServer` from `@modelcontextprotocol/server`, register tools with `server.registerTool(name, {description, inputSchema: z.object(...)}, handler)` using zod schemas, and start with `serveStdio(createServer, ...)` from `@modelcontextprotocol/server/stdio`. Build with `npm run build` before connecting.",
+        "`serveStdio` negotiates the protocol revision per client, serving both 2026-07-28 clients and clients using the 2025-era `initialize`. It calls the factory `createServer()` repeatedly, so the factory must return a NEW `McpServer` each time. Hand-wiring `server.connect(new StdioServerTransport())` only serves 2025-era clients.",
+        "Test with the Inspector or a host. For the modern era the Inspector CLI takes `--protocol-era modern`; it defaults to `legacy`, so test both."
+      ],
+      "examTips": [
+        "Python: type hints + docstring become the tool schema. TypeScript: zod `inputSchema`.",
+        "TypeScript stdio gotcha: factory must return a fresh `McpServer` per call.",
+        "If a TS server 'does not connect', first check you ran the build and use an absolute path in the host config."
+      ],
+      "source": "https://modelcontextprotocol.io/docs/develop/build-server",
+      "example": {
+        "title": "Python tool server (adapted from the quickstart)",
+        "language": "python",
+        "code": "import logging\nfrom mcp.server import MCPServer\n\nlogger = logging.getLogger(__name__)   # logging writes to stderr by default\nmcp = MCPServer(\"weather\")\n\n@mcp.tool()\nasync def get_alerts(state: str) -> str:\n    \"\"\"Get weather alerts for a US state.\n\n    Args:\n        state: Two-letter US state code (e.g. CA, NY)\n    \"\"\"\n    logger.info(\"alerts requested for %s\", state)   # never print() on stdio\n    return \"No active alerts for this state.\"\n\nif __name__ == \"__main__\":\n    mcp.run(transport=\"stdio\")"
+      }
+    },
+    {
+      "heading": "stdio logging goes to stderr, never stdout",
+      "notes": [
+        "On stdio, stdout is the JSON-RPC channel. The spec says the server MUST NOT write anything to stdout that is not a valid MCP message, and each message is a single line with no embedded newlines.",
+        "Anything written to stdout (Python `print()`, JS `console.log()`, Java `System.out.println`, C# `Console.WriteLine`) corrupts the stream and breaks the server.",
+        "Servers MAY write UTF-8 text to **stderr** for informational, debug and error logging. Clients may capture, forward or ignore stderr and SHOULD NOT treat it as an error signal.",
+        "Use Python's `logging` module (writes to stderr), `console.error()` in Node, or a library configured for stderr or files. For HTTP-based servers, stdout logging is fine because it is not the protocol channel.",
+        "The protocol's own logging notifications are deprecated as of 2026-07-28; new implementations should log to stderr (stdio) or use OpenTelemetry.",
+        "Shutdown on stdio: client closes the server's stdin, waits, then escalates (SIGTERM then SIGKILL on POSIX). Servers should exit promptly on stdin EOF."
+      ],
+      "examTips": [
+        "Classic scenario: a server works in the Inspector sometimes but the host reports JSON parse errors -> a stray `print`/`console.log` on stdout.",
+        "Stderr output is not necessarily an error; do not infer failure from it.",
+        "HTTP transport servers are not constrained this way."
+      ],
+      "source": "https://modelcontextprotocol.io/docs/develop/build-server",
+      "example": {
+        "title": "Bad vs good stdio logging",
+        "language": "python",
+        "code": "import logging, sys\nlogging.basicConfig(stream=sys.stderr, level=logging.INFO)\nlogger = logging.getLogger(__name__)\n\nprint(\"Processing request\")          # BAD: stdout, corrupts JSON-RPC\nlogger.info(\"Processing request\")    # GOOD: stderr"
+      }
+    },
+    {
+      "heading": "Authorization (OAuth 2.1)",
+      "notes": [
+        "Authorization is **optional** and applies to **HTTP-based transports**. stdio servers should NOT follow the spec and instead take credentials from the environment (for example env vars).",
+        "Roles: the protected MCP server is an **OAuth 2.1 resource server**; the MCP client is an OAuth 2.1 client; a separate (or co-hosted) authorization server issues tokens.",
+        "Discovery flow: client calls MCP server without a token -> `401 Unauthorized` with `WWW-Authenticate: Bearer resource_metadata=\"...\"` (optionally `scope=`) -> client fetches **Protected Resource Metadata (RFC 9728)**, which MCP servers MUST implement -> learns the authorization server -> fetches authorization server metadata (RFC 8414 or OpenID Connect discovery).",
+        "Client registration options: **Client ID Metadata Documents** (HTTPS URL as `client_id`, SHOULD be supported), pre-registration, or Dynamic Client Registration (RFC 7591; now deprecated, kept for compatibility).",
+        "Client must use **PKCE**, and MUST send the RFC 8707 **`resource`** parameter (canonical MCP server URI) in both authorization and token requests. The client records the issuer and validates the `iss` response parameter (RFC 9207) to prevent mix-up attacks.",
+        "Tokens go in `Authorization: Bearer <token>` on every HTTP request and MUST NOT be in the URI query string. The server MUST validate tokens were issued for it (audience) and MUST NOT accept or pass through tokens meant for other resources.",
+        "Errors: 401 for missing/invalid/expired token; 403 for insufficient scope with `error=\"insufficient_scope\"`, required `scope` and `resource_metadata`; 400 for malformed requests. The client then does a step-up flow using the union of old and new scopes, with retry limits.",
+        "Use least-privilege scopes: small initial set, elevate via targeted challenges."
+      ],
+      "examTips": [
+        "401 = authenticate (no/invalid token); 403 = authenticated but insufficient scope.",
+        "stdio -> env credentials, not OAuth. Remote HTTP -> OAuth.",
+        "Dynamic Client Registration is deprecated; Client ID Metadata Documents are preferred.",
+        "`resource` parameter and audience validation are the defenses against token misuse; token passthrough is forbidden."
+      ],
+      "source": "https://modelcontextprotocol.io/specification/latest/basic/authorization",
+      "example": {
+        "title": "401 challenge and 403 step-up",
+        "language": "text",
+        "code": "HTTP/1.1 401 Unauthorized\nWWW-Authenticate: Bearer resource_metadata=\"https://mcp.example.com/.well-known/oauth-protected-resource\",\n                         scope=\"files:read\"\n\nHTTP/1.1 403 Forbidden\nWWW-Authenticate: Bearer error=\"insufficient_scope\", scope=\"files:write\",\n                         resource_metadata=\"https://mcp.example.com/.well-known/oauth-protected-resource\""
+      }
+    },
+    {
+      "heading": "MCP Inspector",
+      "notes": [
+        "The MCP Inspector is the reference developer tool for testing and debugging MCP servers. One package, `@modelcontextprotocol/inspector`, gives three clients: **Web** (default), **CLI** (`--cli`, scriptable for CI) and **TUI** (`--tui`). Requires Node 22.19.0 or newer and runs via `npx`.",
+        "Launch with the command that starts your server as arguments; for remote servers use `--server-url ... --transport http`. The web client prints a URL carrying a per-launch API token. Set `MCP_AUTO_OPEN_ENABLED=false` to stop auto-opening the browser.",
+        "The CLI lets you call methods directly, for example `--method tools/list` or `--method tools/call --tool-name X --tool-arg k=v`, with JSON output you can pipe to `jq`.",
+        "Inspector supports both protocol eras. It defaults to `legacy`; use `--protocol-era modern` to exercise 2026-07-28 behavior.",
+        "Secrets (OAuth tokens, stdio env values) are stored in the OS keychain when available, otherwise unencrypted in `~/.mcp-inspector/secrets.json` unless you supply a key."
+      ],
+      "examTips": [
+        "Inspector = debug a server before wiring it into a host; use CLI mode for automation/CI.",
+        "The server command goes after `npx @modelcontextprotocol/inspector`; mode flags (`--cli`, `--tui`) must be at the front."
+      ],
+      "source": "https://modelcontextprotocol.io/docs/tools/inspector",
+      "example": {
+        "title": "Inspector commands",
+        "language": "bash",
+        "code": "# web UI against a local stdio server\nnpx @modelcontextprotocol/inspector node path/to/server/index.js\n\n# CLI: list tools and exit\nnpx @modelcontextprotocol/inspector --cli node build/index.js --method tools/list\n\n# remote Streamable HTTP server\nnpx @modelcontextprotocol/inspector --server-url https://api.example.com/mcp --transport http\n\n# published servers\nnpx @modelcontextprotocol/inspector uvx mcp-server-git --repository ~/code/mcp/servers.git"
+      }
+    },
+    {
+      "heading": "Connecting servers to Claude Code",
+      "notes": [
+        "Add servers with `claude mcp add`. Remote HTTP (recommended): `claude mcp add --transport http notion https://mcp.notion.com/mcp`. SSE is deprecated: use http where available. Local stdio: `claude mcp add --transport stdio --env KEY=val name -- npx -y some-server`.",
+        "The `--` separator: everything after it is the server command and its flags, passed unchanged. Claude Code's own options (`--transport`, `--env`, `--scope`, `--header`) must come BEFORE the server name/`--`. Put another option between `--env` and the name or the name is parsed as another `KEY=value`.",
+        "**Scopes**: `local` (default; stored in `~/.claude.json` under the project path, private), `project` (`.mcp.json` in project root, committed and shared via git), `user` (`~/.claude.json`, all your projects, private). On a name clash precedence is local, then project, then user; fields are not merged.",
+        "`.mcp.json` uses a top-level `mcpServers` object and supports env expansion: `${VAR}` and `${VAR:-default}`. Project-scoped servers need user approval in interactive sessions (`claude mcp reset-project-choices` resets). Credential vars like `ANTHROPIC_API_KEY` read as empty in remote `url`/`headers`.",
+        "Management: `claude mcp list`, `get <name>`, `remove <name>`, `login`/`logout` for OAuth, `add-json`, `add-from-claude-desktop`; inside a session `/mcp` shows status, handles OAuth and toggles servers. `claude mcp serve` runs Claude Code itself as a stdio MCP server.",
+        "OAuth: `--callback-port`, `--client-id`, `--client-secret`; a manually set `Authorization` header disables OAuth fallback; `headersHelper` can supply dynamic headers.",
+        "Limits and tuning: `MCP_TIMEOUT` (startup), `MCP_TOOL_TIMEOUT`, per-server `timeout`, `MAX_MCP_OUTPUT_TOKENS` (default 25,000; warning above 10,000). Tool search (`ENABLE_TOOL_SEARCH`) defers loading of MCP tool definitions to save context. MCP resources are referenced with `@server:protocol://path`."
+      ],
+      "examTips": [
+        "Share a server with the team -> `--scope project` (`.mcp.json`), and keep secrets in `${VAR}` not in the file.",
+        "Default scope is local (private to you, this project), not project.",
+        "Flags before the name, server command after `--`.",
+        "User scope = available everywhere for you; project scope = in repo for everyone."
+      ],
+      "source": "https://code.claude.com/docs/en/mcp",
+      "example": {
+        "title": "Adding servers and a shared .mcp.json",
+        "language": "bash",
+        "code": "claude mcp add --transport http --scope project notion https://mcp.notion.com/mcp\nclaude mcp add --transport http secure-api https://api.example.com/mcp \\\n  --header \"Authorization: Bearer your-token\"\nclaude mcp add --env AIRTABLE_API_KEY=YOUR_KEY --transport stdio airtable \\\n  -- npx -y airtable-mcp-server\n\n# .mcp.json (committed)\n# {\n#   \"mcpServers\": {\n#     \"api-server\": {\n#       \"type\": \"http\",\n#       \"url\": \"${API_BASE_URL:-https://api.example.com}/mcp\",\n#       \"headers\": {\"Authorization\": \"Bearer ${API_KEY}\"}\n#     }\n#   }\n# }"
+      }
+    },
+    {
+      "heading": "The Messages API MCP connector",
+      "notes": [
+        "The MCP connector lets the Messages API reach **remote MCP servers directly, with no MCP client of your own**. It is a beta feature: send the `anthropic-beta: mcp-client-2025-11-20` header (newer `mcp-client-2026-09-15` adds recorded/pinned tool lists and includes the earlier behavior). The old `mcp-client-2025-04-04` is deprecated.",
+        "Two parts: `mcp_servers` (connection details: `type: url`, `url` starting with `https://`, unique `name`, optional `authorization_token`) and a matching `mcp_toolset` entry in `tools` with `mcp_server_name`. Every server must be referenced by exactly one toolset, and every toolset must name a defined server.",
+        "Toolset config: `default_config` plus per-tool `configs`, with fields `enabled` (default true) and `defer_loading` (default false). Precedence: individual tool config, then set-level default_config, then system defaults. Use this for allowlist (default disabled, enable some) or denylist (default enabled, disable some) patterns.",
+        "Responses include `mcp_tool_use` blocks (with `server_name`) and `mcp_tool_result` blocks. Your code should not assume `content[0]` is text.",
+        "Limitations: only **tool calls** from the MCP spec are supported (not resources or prompts); the server must be publicly reachable over HTTP (Streamable HTTP or SSE); **local stdio servers cannot be connected**. You supply the OAuth token yourself via `authorization_token`.",
+        "Not eligible for Zero Data Retention. The Messages API connector is different from Claude Code's `claude mcp add`, which runs a full MCP client in the host."
+      ],
+      "examTips": [
+        "Need the model to use a local stdio server through the raw API? Not possible with the connector; you must run your own MCP client and relay tool calls.",
+        "Connector = tools only, public HTTPS URL, beta header, toolset required.",
+        "`mcp_servers` alone is not enough; forgetting the `mcp_toolset` in `tools` is an error."
+      ],
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/mcp-connector",
+      "example": {
+        "title": "MCP connector request",
+        "language": "python",
+        "code": "import anthropic\nclient = anthropic.Anthropic()\nresp = client.beta.messages.create(\n    model=\"claude-sonnet-4-5\",\n    max_tokens=1000,\n    messages=[{\"role\": \"user\", \"content\": \"What tools do you have available?\"}],\n    mcp_servers=[{\n        \"type\": \"url\",\n        \"url\": \"https://example-server.modelcontextprotocol.io/sse\",\n        \"name\": \"example-mcp\",\n        \"authorization_token\": \"YOUR_TOKEN\",\n    }],\n    tools=[{\"type\": \"mcp_toolset\", \"mcp_server_name\": \"example-mcp\"}],\n    betas=[\"mcp-client-2025-11-20\"],\n)"
+      }
+    },
+    {
+      "heading": "Claude Desktop configuration",
+      "notes": [
+        "Claude Desktop is configured through `claude_desktop_config.json`: macOS `~/Library/Application Support/Claude/claude_desktop_config.json`, Windows `%AppData%\\Claude\\claude_desktop_config.json`, Linux `~/.config/Claude/claude_desktop_config.json`. Create it if missing.",
+        "Servers go under the `mcpServers` key; each has a `command` and `args` (and optionally `env`). Desktop launches that command as a stdio subprocess. Use **absolute paths** in args. MCP UI only appears once at least one server is configured correctly.",
+        "Restart Claude Desktop after editing the file. If a server fails, check that its stdout contains only protocol messages and that logs go to stderr.",
+        "You can import Desktop servers into Claude Code with `claude mcp add-from-claude-desktop`, and expose Claude Code to Desktop by adding a `claude mcp serve` entry."
+      ],
+      "examTips": [
+        "Key is `mcpServers` in Desktop and in `.mcp.json`; Desktop config is stdio command/args style.",
+        "Relative paths are the usual cause of 'server not found' in Desktop."
+      ],
+      "source": "https://modelcontextprotocol.io/docs/develop/build-server",
+      "example": {
+        "title": "claude_desktop_config.json",
+        "language": "json",
+        "code": "{\n  \"mcpServers\": {\n    \"weather\": {\n      \"command\": \"uv\",\n      \"args\": [\"--directory\", \"/ABSOLUTE/PATH/TO/PARENT/FOLDER/weather\", \"run\", \"weather.py\"]\n    },\n    \"weather-ts\": {\n      \"command\": \"node\",\n      \"args\": [\"/ABSOLUTE/PATH/TO/PARENT/FOLDER/weather/build/index.js\"]\n    }\n  }\n}"
+      }
+    },
+    {
+      "heading": "MCP security",
+      "notes": [
+        "**Confused deputy**: an MCP proxy server with a static client ID toward a third-party authorization server, plus dynamic client registration and consent cookies, can let an attacker skip consent and steal an authorization code. Mitigation: per-client consent before the third-party flow, exact `redirect_uri` matching, validated `state`, `__Host-` secure cookies, CSRF protection and anti-framing.",
+        "**Token passthrough** is forbidden: servers MUST NOT accept tokens not issued for them or forward client tokens downstream. It bypasses security controls, breaks audit trails and trust boundaries.",
+        "**SSRF** during OAuth discovery: a malicious server can point metadata URLs at internal IPs or cloud metadata (169.254.169.254). Mitigate with HTTPS enforcement, blocking private/link-local ranges, validating redirects, egress proxies, and awareness of DNS rebinding TOCTOU.",
+        "**State handle hijacking** (2026-07-28 successor to session hijacking): do not treat possession of a handle as authentication; use secure random handles bound server-side to the verified user.",
+        "**Local server compromise**: one-click local server configs must show the exact command and require consent; sandbox servers with minimal privileges; local HTTP servers need auth tokens or restricted IPC; prefer stdio to limit access to the client.",
+        "**OAuth URL validation**: clients must allow only http/https schemes (reject `javascript:`, `data:`, `file:`), and never open URLs through a shell.",
+        "Also: mix-up attacks (validate `iss`), localhost redirect impersonation, and **scope minimization** (avoid wildcard or omnibus scopes, elevate incrementally).",
+        "In Claude Code, project-scoped `.mcp.json` servers need explicit approval, because they run commands or reach hosts a repository chose."
+      ],
+      "examTips": [
+        "Match attack to fix: confused deputy -> per-client consent; token passthrough -> audience validation and no forwarding; SSRF -> block private ranges/egress proxy; DNS rebinding -> Origin validation and localhost binding.",
+        "Third-party MCP servers are untrusted code: review commands before approving.",
+        "Never put access tokens in query strings."
+      ],
+      "source": "https://modelcontextprotocol.io/docs/tutorials/security/security_best_practices"
+    }
+  ],
+  "keyTakeaways": [
+    "Host creates one MCP client per MCP server; each client has a dedicated connection.",
+    "Server primitives: tools (executed), resources (context data), prompts (templates). Client features: elicitation, roots, and (deprecated in 2026-07-28) sampling.",
+    "Two transports: stdio (local subprocess) and Streamable HTTP (single endpoint, POST, JSON or SSE response). HTTP+SSE is deprecated.",
+    "stdio: never write to stdout except JSON-RPC; log to stderr (logging, console.error).",
+    "Legacy lifecycle: initialize -> response -> notifications/initialized; only negotiated capabilities may be used. 2026-07-28 is stateless with per-request _meta and optional server/discover.",
+    "Local Streamable HTTP servers: validate Origin, bind to 127.0.0.1, authenticate.",
+    "OAuth applies to HTTP transports: 401 + WWW-Authenticate -> Protected Resource Metadata -> PKCE + resource parameter; stdio uses env credentials.",
+    "Servers must validate token audience and never pass tokens through to downstream APIs.",
+    "Claude Code scopes: local (default, private), project (.mcp.json, shared), user (all projects); flags go before the name, server command after `--`.",
+    "Messages API MCP connector: beta header, mcp_servers + mcp_toolset, tools only, public HTTP servers only, no stdio.",
+    "Claude Desktop uses mcpServers in claude_desktop_config.json with command/args and absolute paths.",
+    "MCP Inspector (`npx @modelcontextprotocol/inspector`) has web, --cli and --tui modes for testing servers."
+  ],
+  "glossary": [
+    {
+      "term": "MCP host",
+      "definition": "The AI application (Claude Code, Claude Desktop) that manages one or more MCP clients."
+    },
+    {
+      "term": "MCP client",
+      "definition": "Component inside the host that maintains a connection to a single MCP server."
+    },
+    {
+      "term": "MCP server",
+      "definition": "Program that provides context (tools, resources, prompts) to clients, local or remote."
+    },
+    {
+      "term": "Tool",
+      "definition": "Executable function the model can invoke via tools/call, described by name, description and JSON Schema inputSchema."
+    },
+    {
+      "term": "Resource",
+      "definition": "Data source providing context, read via resources/read."
+    },
+    {
+      "term": "Prompt",
+      "definition": "Reusable template retrieved with prompts/get."
+    },
+    {
+      "term": "Elicitation",
+      "definition": "Client feature letting a server ask the user for input or confirmation (elicitation/create)."
+    },
+    {
+      "term": "Sampling",
+      "definition": "Server request for an LLM completion from the client (sampling/createMessage); deprecated as of 2026-07-28."
+    },
+    {
+      "term": "Roots",
+      "definition": "Filesystem locations a client exposes to servers via the roots capability."
+    },
+    {
+      "term": "MRTR",
+      "definition": "Multi Round-Trip Requests: server returns InputRequiredResult and the client retries with inputResponses."
+    },
+    {
+      "term": "stdio transport",
+      "definition": "Newline-delimited JSON-RPC over a client-launched subprocess's stdin/stdout; logs go to stderr."
+    },
+    {
+      "term": "Streamable HTTP",
+      "definition": "Remote transport using a single MCP endpoint; POST per message, response as JSON or SSE stream."
+    },
+    {
+      "term": "HTTP+SSE",
+      "definition": "Deprecated 2024-11-05 remote transport replaced by Streamable HTTP."
+    },
+    {
+      "term": "server/discover",
+      "definition": "Mandatory request in 2026-07-28 returning supported versions, capabilities and server info."
+    },
+    {
+      "term": "initialize",
+      "definition": "Legacy handshake request exchanging protocol version, capabilities and implementation info."
+    },
+    {
+      "term": "listChanged",
+      "definition": "Capability sub-flag indicating list-change notifications for tools, prompts or resources."
+    },
+    {
+      "term": "Protected Resource Metadata",
+      "definition": "RFC 9728 document an MCP server publishes to point clients to its authorization server."
+    },
+    {
+      "term": "Resource indicator",
+      "definition": "RFC 8707 `resource` parameter naming the MCP server a token is for; used for audience binding."
+    },
+    {
+      "term": "Token passthrough",
+      "definition": "Forbidden anti-pattern of accepting or forwarding tokens not issued for the MCP server."
+    },
+    {
+      "term": "Confused deputy",
+      "definition": "Attack where an OAuth proxy MCP server is tricked into granting codes without proper user consent."
+    },
+    {
+      "term": ".mcp.json",
+      "definition": "Project-root file with an mcpServers object, used for project-scoped Claude Code servers."
+    },
+    {
+      "term": "mcp_toolset",
+      "definition": "Entry in the Messages API tools array that enables and configures tools from a server in mcp_servers."
+    },
+    {
+      "term": "MCP Inspector",
+      "definition": "Official tool for testing and debugging MCP servers (web, CLI, TUI)."
+    }
+  ],
+  "quiz": [
+    {
+      "q": "A developer's Python stdio MCP server works in unit tests, but Claude Desktop reports JSON parse errors on startup. The code contains `print('Server starting...')`. What is the correct fix?",
+      "options": [
+        "Switch the transport to SSE",
+        "Replace the `print` with the `logging` module so output goes to stderr",
+        "Add a newline at the end of the print statement",
+        "Wrap the message in a JSON-RPC notification and print it"
+      ],
+      "answer": 1,
+      "explanation": "On stdio, stdout is reserved for JSON-RPC messages; anything else corrupts the stream. Logging to stderr is allowed. SSE is deprecated and unrelated; a newline does not fix it; the server should not hand-craft notifications for logs.",
+      "source": "https://modelcontextprotocol.io/docs/develop/build-server"
+    },
+    {
+      "q": "Which statement correctly describes host, client and server in MCP?",
+      "options": [
+        "The host runs one client that multiplexes all servers",
+        "The host creates one client per server, each with a dedicated connection",
+        "The server creates clients on demand for each host",
+        "The client and host are the same process by definition, and servers are always remote"
+      ],
+      "answer": 1,
+      "explanation": "The host (for example Claude Code) instantiates one MCP client per MCP server. Servers can be local (stdio) or remote.",
+      "source": "https://modelcontextprotocol.io/docs/learn/architecture"
+    },
+    {
+      "q": "You must expose a database schema as read-only context and also let the model run parameterized queries. Which primitive mapping fits best?",
+      "options": [
+        "Schema as a prompt, queries as a resource",
+        "Schema as a resource, queries as a tool",
+        "Both as resources",
+        "Schema as a tool, queries as sampling"
+      ],
+      "answer": 1,
+      "explanation": "Resources supply contextual data; tools are executable functions invoked with `tools/call`. Prompts are templates, and sampling is a client feature.",
+      "source": "https://modelcontextprotocol.io/docs/learn/architecture"
+    },
+    {
+      "q": "A team wants a shared MCP server config checked into the repo so every developer gets it, with the API key supplied from each developer's environment. What should they do?",
+      "options": [
+        "`claude mcp add --scope user` and commit `~/.claude.json`",
+        "`claude mcp add --scope project`, producing `.mcp.json` with `${API_KEY}` in headers",
+        "Use the default local scope and email the command",
+        "Put the key literally in `.mcp.json`"
+      ],
+      "answer": 1,
+      "explanation": "Project scope writes `.mcp.json` in the project root for sharing via git, and `${VAR}` expansion keeps secrets out of the file. User/local scopes are private and not shared.",
+      "source": "https://code.claude.com/docs/en/mcp"
+    },
+    {
+      "q": "Which command correctly registers a local stdio server in Claude Code, passing `--port 8080` to the server itself?",
+      "options": [
+        "`claude mcp add myserver --transport stdio python server.py --port 8080`",
+        "`claude mcp add --transport stdio myserver -- python server.py --port 8080`",
+        "`claude mcp add --transport stdio myserver python server.py -- --port 8080`",
+        "`claude mcp add --transport http myserver python server.py --port 8080`"
+      ],
+      "answer": 1,
+      "explanation": "Claude Code's options come before the name, and everything after `--` is the server command passed unchanged. Without `--`, `--port` could be parsed as a Claude Code option.",
+      "source": "https://code.claude.com/docs/en/mcp"
+    },
+    {
+      "q": "An application calls the Messages API and wants Claude to use tools from a company MCP server running as a local stdio process on a developer laptop. What is true about the MCP connector?",
+      "options": [
+        "It supports stdio via `command` and `args` inside `mcp_servers`",
+        "It cannot connect to local stdio servers; the server must be publicly reachable over HTTP",
+        "It works only if the server also exposes resources and prompts",
+        "It requires the `mcp-client-2025-04-04` header"
+      ],
+      "answer": 1,
+      "explanation": "The connector supports only tool calls and requires a publicly exposed HTTP server (Streamable HTTP or SSE). The 2025-04-04 version is deprecated.",
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/mcp-connector"
+    },
+    {
+      "q": "A request using the MCP connector defines two entries in `mcp_servers` but only one `mcp_toolset` in `tools`. What happens?",
+      "options": [
+        "The second server's tools are enabled by default",
+        "The request is invalid: each server must be referenced by exactly one toolset",
+        "The second server is used only for resources",
+        "Claude chooses a server at random"
+      ],
+      "answer": 1,
+      "explanation": "Every MCP server in `mcp_servers` must be referenced by exactly one MCPToolset, and each toolset's `mcp_server_name` must match a defined server.",
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/mcp-connector"
+    },
+    {
+      "q": "In the legacy (2025-era) MCP lifecycle, what is the correct order of the opening messages?",
+      "options": [
+        "`initialized` notification, `initialize` request, `initialize` response",
+        "`initialize` request, `initialize` response, `notifications/initialized`",
+        "`tools/list`, `initialize`, `initialized`",
+        "`initialize` response, `initialize` request, `tools/list`"
+      ],
+      "answer": 1,
+      "explanation": "The client sends `initialize`, the server answers with version/capabilities, then the client sends the `notifications/initialized` notification before normal operation.",
+      "source": "https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle"
+    },
+    {
+      "q": "A server's `initialize` response declares only `{\"tools\": {\"listChanged\": true}}`. Which client behavior is correct?",
+      "options": [
+        "Call `resources/list` anyway; servers usually support it",
+        "Use `tools/list` and expect `notifications/tools/list_changed`, but do not use resources or prompts",
+        "Subscribe to individual tool changes with `subscribe`",
+        "Assume prompts are available because tools are"
+      ],
+      "answer": 1,
+      "explanation": "Only negotiated capabilities may be used. `listChanged` enables list-change notifications for tools; `subscribe` applies to resources only.",
+      "source": "https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle"
+    },
+    {
+      "q": "A 2026-07-28 (modern) client sends a request with an unsupported protocol version. What does a conforming server return?",
+      "options": [
+        "A silent connection close",
+        "`UnsupportedProtocolVersionError` listing supported versions, so the client can retry",
+        "An `initialize` response with another version",
+        "HTTP 405 Method Not Allowed"
+      ],
+      "answer": 1,
+      "explanation": "In the stateless modern protocol every request declares a version; the server rejects unsupported ones with a -32022 error listing supported versions (HTTP 400 on Streamable HTTP).",
+      "source": "https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning"
+    },
+    {
+      "q": "An existing integration uses the 2024-11-05 HTTP+SSE transport. What is the recommended direction?",
+      "options": [
+        "Keep it; it is the preferred remote transport",
+        "Migrate to Streamable HTTP, since HTTP+SSE is deprecated",
+        "Move to stdio for remote use",
+        "Use WebSockets, which MCP mandates"
+      ],
+      "answer": 1,
+      "explanation": "HTTP+SSE has been deprecated since 2025-03-26; new implementations should not adopt it and existing ones should migrate to Streamable HTTP.",
+      "source": "https://modelcontextprotocol.io/specification/latest/basic/transports/streamable-http"
+    },
+    {
+      "q": "A locally running MCP server uses Streamable HTTP and listens on 0.0.0.0 without checking the `Origin` header. Which attack does this expose it to, and what is the fix?",
+      "options": [
+        "Token passthrough; stop forwarding tokens",
+        "DNS rebinding from a malicious website; validate Origin (403 on invalid), bind to 127.0.0.1 and authenticate",
+        "SSRF; block private IP ranges",
+        "Confused deputy; add per-client consent"
+      ],
+      "answer": 1,
+      "explanation": "The spec requires validating `Origin` to prevent DNS rebinding and recommends localhost binding and authentication for local servers.",
+      "source": "https://modelcontextprotocol.io/specification/latest/basic/transports/streamable-http"
+    },
+    {
+      "q": "A remote MCP server receives a request with no token. What should it return so a compliant client can start OAuth?",
+      "options": [
+        "200 with an empty tool list",
+        "401 with `WWW-Authenticate: Bearer resource_metadata=...` pointing to Protected Resource Metadata",
+        "403 with the list of scopes in the body",
+        "302 redirect to the client's callback URL"
+      ],
+      "answer": 1,
+      "explanation": "MCP servers must implement RFC 9728 Protected Resource Metadata and advertise it in the 401 `WWW-Authenticate` header; clients discover the authorization server from it. 403 is for insufficient scope.",
+      "source": "https://modelcontextprotocol.io/specification/latest/basic/authorization"
+    },
+    {
+      "q": "An MCP server receives a valid access token that was issued for a different API and forwards it unchanged to a downstream service. Which rule does this violate?",
+      "options": [
+        "Scope minimization",
+        "The prohibition on token passthrough and requirement to validate token audience",
+        "The stdio logging rule",
+        "The MRTR pattern"
+      ],
+      "answer": 1,
+      "explanation": "MCP servers must only accept tokens issued for them (audience validation per RFC 8707) and must not accept or transit other tokens; passthrough enables confused-deputy style abuse and breaks auditing.",
+      "source": "https://modelcontextprotocol.io/docs/tutorials/security/security_best_practices"
+    },
+    {
+      "q": "A developer wants to quickly test whether a new server returns the right tools before configuring any host, and also script the check in CI. Which is best?",
+      "options": [
+        "Add it to Claude Desktop and ask the model",
+        "Run `npx @modelcontextprotocol/inspector --cli <server command> --method tools/list`",
+        "Call the server with the Messages API connector",
+        "Use `claude mcp serve`"
+      ],
+      "answer": 1,
+      "explanation": "The MCP Inspector's CLI mode is scriptable and non-interactive, built for CI. The connector cannot reach local stdio servers, and `claude mcp serve` exposes Claude Code, not your server.",
+      "source": "https://modelcontextprotocol.io/docs/tools/inspector"
+    },
+    {
+      "q": "A server author wants the model to ask the user a confirmation question mid-tool-call in the 2026-07-28 protocol. How is this delivered?",
+      "options": [
+        "The server sends an independent `elicitation/create` JSON-RPC request over stdout",
+        "The server returns an `InputRequiredResult` with `inputRequests`, and the client retries with `inputResponses`",
+        "The server uses `sampling/createMessage`",
+        "The server opens a GET SSE stream"
+      ],
+      "answer": 1,
+      "explanation": "2026-07-28 uses Multi Round-Trip Requests: servers no longer initiate requests; they return an input-required result and the client retries with responses. Sampling is deprecated and the GET stream was removed.",
+      "source": "https://modelcontextprotocol.io/specification/latest/basic/transports/streamable-http"
+    }
+  ]
+}

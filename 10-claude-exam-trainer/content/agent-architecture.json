@@ -1,0 +1,644 @@
+{
+  "slug": "agent-architecture",
+  "title": "Agent Architecture",
+  "overview": "This objective covers how Anthropic defines agents (LLMs using tools in a loop, directing their own process) versus workflows (predefined code paths), the mechanics of the tool-use loop driven by stop_reason, and how to scale up with orchestrator/subagent designs. It also covers managing context, state and memory across long tasks, keeping humans in the loop through permissions and approvals, and how the Claude Agent SDK packages all of this. The exam tests whether you can pick the right pattern and read the loop correctly, such as when to continue, stop or escalate.",
+  "sources": [
+    {
+      "title": "Building effective agents",
+      "url": "https://www.anthropic.com/engineering/building-effective-agents"
+    },
+    {
+      "title": "Handle tool calls",
+      "url": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls"
+    },
+    {
+      "title": "Stop reasons",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons"
+    },
+    {
+      "title": "Parallel tool use",
+      "url": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/parallel-tool-use"
+    },
+    {
+      "title": "How the agent loop works (Agent SDK)",
+      "url": "https://code.claude.com/docs/en/agent-sdk/agent-loop"
+    },
+    {
+      "title": "Agent SDK overview",
+      "url": "https://code.claude.com/docs/en/agent-sdk/overview"
+    },
+    {
+      "title": "Subagents in the SDK",
+      "url": "https://code.claude.com/docs/en/agent-sdk/subagents"
+    },
+    {
+      "title": "Handle approvals and user input",
+      "url": "https://code.claude.com/docs/en/agent-sdk/user-input"
+    },
+    {
+      "title": "How we built our multi-agent research system",
+      "url": "https://www.anthropic.com/engineering/multi-agent-research-system"
+    },
+    {
+      "title": "Effective context engineering for AI agents",
+      "url": "https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents"
+    },
+    {
+      "title": "Memory tool",
+      "url": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/memory-tool"
+    },
+    {
+      "title": "Effective harnesses for long-running agents",
+      "url": "https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents"
+    }
+  ],
+  "sections": [
+    {
+      "heading": "How Anthropic defines agents vs workflows",
+      "notes": [
+        "Anthropic groups everything under **agentic systems** and splits them into two architectures. **Workflows** orchestrate LLMs and tools through **predefined code paths**. **Agents** are systems where the LLM **dynamically directs its own process and tool usage**, keeping control over how it completes the task.",
+        "Agents begin with a command or interactive discussion with a human, plan and operate independently, and gain 'ground truth' from the environment at each step (tool results, code execution). They may pause for human feedback at checkpoints or when blocked.",
+        "Anthropic describes agents as typically just **LLMs using tools based on environmental feedback in a loop**. Autonomy brings higher cost and the potential for compounding errors, so test extensively in sandboxes and add guardrails and stopping conditions (for example a maximum number of iterations).",
+        "Guidance: find the simplest solution possible and only increase complexity when needed. Often a single LLM call with retrieval and in-context examples is enough. Agentic systems trade latency and cost for better task performance.",
+        "Use **workflows** for well-defined tasks needing predictability and consistency. Use **agents** when flexibility and model-driven decision-making are needed at scale.",
+        "The basic building block is the **augmented LLM**: an LLM with retrieval, tools and memory, where the model generates its own search queries, selects tools and decides what to retain.",
+        "Frameworks (including the Claude Agent SDK) speed up setup but can obscure prompts and responses; Anthropic suggests starting with direct API calls and understanding any framework's underlying code."
+      ],
+      "example": {
+        "title": "Workflow vs agent control flow",
+        "language": "python",
+        "code": "# WORKFLOW: code decides the path (prompt chain with a gate)\noutline = llm('Write an outline for: ' + topic)\nif not passes_checks(outline):          # programmatic gate\n    raise ValueError('bad outline')\ndraft = llm('Write the doc from this outline: ' + outline)\n\n# AGENT: the model decides the path\nmessages = [{'role': 'user', 'content': task}]\nwhile True:\n    resp = client.messages.create(model=MODEL, max_tokens=2048, tools=TOOLS, messages=messages)\n    if resp.stop_reason != 'tool_use':   # model chose to stop\n        break\n    # ...run whichever tools the model chose, append results, loop"
+      },
+      "examTips": [
+        "Key discriminator: who controls the next step? Predefined code = workflow. LLM decides dynamically = agent.",
+        "Answer 'simplest thing that works' when a question asks what to try first; a single optimized LLM call often beats an agent.",
+        "Agents are for open-ended problems where you cannot predict the number or order of steps; they cost more latency/tokens.",
+        "Both workflows and agents are 'agentic systems'. Do not treat 'agentic' as a synonym for 'agent'."
+      ],
+      "source": "https://www.anthropic.com/engineering/building-effective-agents"
+    },
+    {
+      "heading": "Workflow patterns (chaining, routing, parallelization, orchestrator-workers, evaluator-optimizer)",
+      "notes": [
+        "**Prompt chaining**: decompose a task into sequential steps where each LLM call processes the previous output, with optional programmatic **gates** between steps. Trades latency for accuracy. Use when a task cleanly splits into fixed subtasks (outline, check, then draft).",
+        "**Routing**: classify an input and send it to a specialized follow-up task, enabling separation of concerns and specialized prompts. Example: easy questions to a smaller model, hard ones to a more capable model; different support categories to different flows.",
+        "**Parallelization**: run LLMs simultaneously and aggregate programmatically. **Sectioning** = independent subtasks in parallel (e.g. guardrail check alongside the main response). **Voting** = the same task several times for diverse outputs or confidence (e.g. several prompts reviewing code for vulnerabilities).",
+        "**Orchestrator-workers**: a central LLM dynamically breaks a task into subtasks, delegates to worker LLMs and synthesizes results. Unlike parallelization, subtasks are **not predefined**; the orchestrator decides based on input. Suits coding changes touching an unpredictable number of files, or multi-source search.",
+        "**Evaluator-optimizer**: one LLM generates, another evaluates and provides feedback in a loop. Works when there are clear evaluation criteria and iteration measurably improves output (literary translation, complex multi-round search)."
+      ],
+      "example": {
+        "title": "Choosing a pattern",
+        "language": "text",
+        "code": "Task: classify support tickets, then answer each with a category-specific prompt\n  -> Routing\nTask: run a content guardrail while generating the answer\n  -> Parallelization (sectioning)\nTask: 5 independent prompts each review code for vulns, flag if any raise a concern\n  -> Parallelization (voting)\nTask: fix a bug that may touch 1 to 20 files, unknown up front\n  -> Orchestrator-workers\nTask: translate a poem, critique tone, refine until good\n  -> Evaluator-optimizer\nTask: outline -> validate outline -> write document\n  -> Prompt chaining (with a gate)"
+      },
+      "examTips": [
+        "Parallelization vs orchestrator-workers: parallelization has fixed, predefined branches aggregated by code; orchestrator-workers lets an LLM decide the subtasks dynamically.",
+        "Sectioning splits different subtasks; voting repeats the same task.",
+        "Evaluator-optimizer requires clear evaluation criteria; if you cannot define 'good', it is the wrong pattern.",
+        "Prompt chaining sacrifices latency for accuracy; routing sacrifices nothing in accuracy but requires a reliable classifier."
+      ],
+      "source": "https://www.anthropic.com/engineering/building-effective-agents"
+    },
+    {
+      "heading": "The agent loop and stop_reason",
+      "notes": [
+        "Every successful Messages API response includes a **stop_reason**. Failures show up as HTTP 4xx/5xx errors, not as stop reasons, so keep error handling and stop-reason handling on separate paths.",
+        "Values: `end_turn` (finished naturally, use the response), `tool_use` (Claude is calling a tool, run it and return the result), `max_tokens` (hit your limit; raise it or continue), `stop_sequence` (read which sequence fired), `pause_turn` (a server-tool loop hit its iteration limit, default 10; resend the assistant content unchanged), `refusal` (read `stop_details`, retry on a fallback model), `model_context_window_exceeded` (response truncated by the context window).",
+        "The agent loop: send messages + tools, check `stop_reason`; if `tool_use`, execute the tools, append the assistant message and a user message of `tool_result` blocks, call again; stop when the reason is not `tool_use` (typically `end_turn`).",
+        "If `max_tokens` truncates a response in the middle of a `tool_use` block, retry with a higher `max_tokens` to get the full tool call.",
+        "Empty `end_turn` responses (2-3 tokens, no content) commonly come from adding text blocks right after `tool_result` blocks or resending Claude's completed answer. Fix: send only the `tool_result`, no extra text. Do not retry with the empty response.",
+        "In streaming, `stop_reason` is null in `message_start` and appears only in the `message_delta` event."
+      ],
+      "example": {
+        "title": "Manual agentic loop with stop_reason dispatch",
+        "language": "python",
+        "code": "messages = [{'role': 'user', 'content': 'What is the weather in SF?'}]\nfor _ in range(10):                      # stopping condition\n    resp = client.messages.create(\n        model=MODEL, max_tokens=1024, tools=tools, messages=messages)\n    match resp.stop_reason:\n        case 'tool_use':\n            messages.append({'role': 'assistant', 'content': resp.content})\n            results = []\n            for b in resp.content:\n                if b.type == 'tool_use':\n                    try:\n                        out = run_tool(b.name, b.input)\n                        results.append({'type': 'tool_result', 'tool_use_id': b.id, 'content': out})\n                    except Exception as e:\n                        results.append({'type': 'tool_result', 'tool_use_id': b.id,\n                                        'content': f'Error: {e}', 'is_error': True})\n            messages.append({'role': 'user', 'content': results})\n        case 'pause_turn':\n            messages.append({'role': 'assistant', 'content': resp.content})  # resend as-is\n        case 'max_tokens' | 'model_context_window_exceeded':\n            handle_truncation(resp); break\n        case 'refusal':\n            handle_refusal(resp); break\n        case _:                           # end_turn, stop_sequence\n            print(resp.content[0].text); break"
+      },
+      "examTips": [
+        "Continue the loop on tool_use (and pause_turn). Stop on end_turn. Never assume success: always check stop_reason.",
+        "pause_turn is for server tools (like web search) and means 'resend the assistant content unchanged'; tool_use is for client tools where YOU execute.",
+        "If a question shows Claude returning empty end_turn after tool results, the cause is usually text added after tool_result blocks.",
+        "Distinguish API errors (HTTP status) from stop reasons (200 responses). A refusal is a 200 with stop_reason 'refusal'."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons"
+    },
+    {
+      "heading": "The tool-use loop: tool_use, tool_result, errors and parallel calls",
+      "notes": [
+        "A client-tool response has `stop_reason: tool_use` and one or more `tool_use` blocks with `id`, `name` and `input` (conforming to the tool's `input_schema`). Your code runs the tool and replies with a **user** message containing `tool_result` blocks.",
+        "A `tool_result` has `tool_use_id` (the id of the matching tool_use), optional `content` (string, nested blocks, or documents) and optional `is_error`.",
+        "Formatting rules: tool results must **immediately follow** their tool_use message (no messages between); in the user message the `tool_result` blocks come **first**, any text only **after**. Violations produce errors like 'tool_use ids were found without tool_result blocks immediately after'.",
+        "Send one `tool_result` for every `tool_use` block, and keep the same `tools` array when replying. For mixed turns containing a server tool call with no result yet, reply with only `tool_result` blocks.",
+        "Errors: if a tool fails, return the message with `is_error: true`. Write **instructive** errors (what went wrong, what to try next, e.g. 'Rate limit exceeded. Retry after 60 seconds.'). For invalid/missing parameters, Claude typically retries 2-3 times with corrections. `strict: true` on tool definitions guarantees inputs match the schema.",
+        "Parallel tool use is on by default: one assistant turn can have several `tool_use` blocks. You decide whether to execute concurrently (independent, read-only) or sequentially (side effects). Return all results in a single user message. To disable, set `disable_parallel_tool_use: true` inside `tool_choice` (it is not a top-level parameter); with `auto` this means at most one tool per response.",
+        "Tool results can contain untrusted content (web pages, emails). Keep it inside `tool_result` blocks rather than system prompts, and treat it as a prompt-injection risk.",
+        "Server tools (e.g. web search) run on Anthropic's side; you do not handle is_error for them. The SDK **tool runner** (beta) can run the loop for you."
+      ],
+      "example": {
+        "title": "tool_use and matching tool_result (with an error)",
+        "language": "json",
+        "code": "// Assistant turn\n{\"role\": \"assistant\", \"stop_reason\": \"tool_use\", \"content\": [\n  {\"type\": \"text\", \"text\": \"I'll check the weather.\"},\n  {\"type\": \"tool_use\", \"id\": \"toolu_01A09q\", \"name\": \"get_weather\",\n   \"input\": {\"location\": \"San Francisco, CA\", \"unit\": \"celsius\"}}\n]}\n\n// Next user turn: tool_result FIRST, text (if any) after\n{\"role\": \"user\", \"content\": [\n  {\"type\": \"tool_result\", \"tool_use_id\": \"toolu_01A09q\",\n   \"content\": \"ConnectionError: weather API unavailable (HTTP 500). Retry in 30s.\",\n   \"is_error\": true}\n]}"
+      },
+      "examTips": [
+        "Tool results go in a USER message (there is no 'tool' role in the Claude API).",
+        "tool_use_id must match the tool_use id exactly; mismatches or missing results cause a 400.",
+        "Text before tool_result blocks in the same user message is a formatting error; text after is allowed for client-only turns.",
+        "Return tool failures as is_error results rather than crashing the loop, so Claude can adapt.",
+        "disable_parallel_tool_use lives inside tool_choice, not at the top level."
+      ],
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls"
+    },
+    {
+      "heading": "Orchestrator and subagents (multi-agent design)",
+      "notes": [
+        "Anthropic's research system uses an **orchestrator-worker** pattern: a **lead agent** analyzes the query, develops a strategy, and spawns **subagents** that search in parallel; a separate CitationAgent then attaches sources.",
+        "Results: a multi-agent system with Opus 4 as lead and Sonnet 4 subagents beat single-agent Opus 4 by **90.2%** on Anthropic's internal research eval, mainly on breadth-first queries. Token usage explained about 80% of the variance in BrowseComp performance.",
+        "Costs: agents use roughly **4x** the tokens of chat; multi-agent systems roughly **15x**. So multi-agent fits **high-value, highly parallelizable** tasks and fits poorly where agents must share lots of context or have many dependencies (most coding tasks).",
+        "Prompting subagents: give each a clear **objective, output format, guidance on tools and sources, and task boundaries** to avoid duplicate work. Embed effort-scaling rules (simple lookup = one agent and a few tool calls). Start with broad queries then narrow.",
+        "Production issues: errors compound in stateful agents, so build resumable checkpoints and retries; use tracing; deploy gradually (rainbow deployments) so running agents are not disrupted. Synchronous subagent execution can bottleneck the lead.",
+        "In the Agent SDK, subagents are separate agent instances defined via `agents` in `query()` options (programmatic, recommended), as markdown files in `.claude/agents/`, or the built-in `general-purpose` subagent. Claude invokes them through the **Agent** tool (named `Task` in older versions and in the `system:init` tools list), so `Agent` must be allowed.",
+        "Four benefits: **context isolation** (only the subagent's final message returns), **parallelization**, **specialized instructions**, and **tool restrictions**.",
+        "`AgentDefinition` fields: `description` (required, when to use it), `prompt` (required, its system prompt), plus optional `tools`, `disallowedTools`, `model`, `skills`, `memory`, `mcpServers`, `maxTurns`, `background`, `effort`, `permissionMode`.",
+        "What a subagent receives: its own prompt and the Agent tool's prompt string, project CLAUDE.md, and tool definitions. It does **not** receive the parent's conversation history or tool results, so put file paths, errors and decisions into the delegation prompt. Messages from inside a subagent carry `parent_tool_use_id`.",
+        "Limits: depth (`CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`, default 3), concurrency (`CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`, default 20), and spend (`max_budget_usd` counts subagent spend). `AskUserQuestion` is not available inside subagents."
+      ],
+      "example": {
+        "title": "Defining read-only and test-running subagents (SDK)",
+        "language": "python",
+        "code": "from claude_agent_sdk import query, ClaudeAgentOptions, AgentDefinition\n\nasync for message in query(\n    prompt='Review the authentication module for security issues',\n    options=ClaudeAgentOptions(\n        allowed_tools=['Read', 'Grep', 'Glob', 'Agent'],   # Agent tool enables delegation\n        agents={\n            'code-reviewer': AgentDefinition(\n                description='Expert code review specialist. Use for quality and security reviews.',\n                prompt='You are a code review specialist...',\n                tools=['Read', 'Grep', 'Glob'],            # read-only\n                model='sonnet',\n            ),\n            'test-runner': AgentDefinition(\n                description='Runs and analyzes test suites.',\n                prompt='You are a test execution specialist...',\n                tools=['Bash', 'Read', 'Grep'],\n            ),\n        },\n    ),\n):\n    if hasattr(message, 'result'):\n        print(message.result)"
+      },
+      "examTips": [
+        "Subagents do not inherit the parent's conversation: pass needed context in the Agent tool prompt.",
+        "Why subagents? Keep the main context lean, parallelize independent work, restrict tools. Not because they are cheaper: multi-agent costs more tokens (about 15x chat).",
+        "Multi-agent is a poor fit for tightly coupled work needing shared context (e.g. many coding tasks).",
+        "If Claude does not delegate, write a clearer description or name the subagent explicitly in the prompt. The Agent tool must be in the allowed tools.",
+        "Orchestrator-workers (LLM-decided subtasks) is the workflow-pattern ancestor of the lead-agent/subagent design."
+      ],
+      "source": "https://code.claude.com/docs/en/agent-sdk/subagents"
+    },
+    {
+      "heading": "Context, state and memory management",
+      "notes": [
+        "**Context engineering** extends prompt engineering to everything in the model's context at inference time. Context is a finite resource with diminishing returns: **context rot** means recall accuracy falls as token count grows.",
+        "Four techniques for long-horizon work: **compaction** (summarize near-full history and continue in a fresh window; tune for recall first, then precision; clearing old tool results is a light form), **structured note-taking / agentic memory** (agent writes NOTES.md or to-do lists outside the window and reloads them), **sub-agent architectures** (focused work in clean windows returning condensed summaries, often 1,000-2,000 tokens), and **just-in-time retrieval** (keep lightweight references like file paths and load with tools at runtime; hybrid approaches preload some data).",
+        "Prompt guidance: system prompts at the 'right altitude', minimal and distinct tool sets, a few diverse canonical examples rather than long edge-case lists.",
+        "In the Agent SDK the context window accumulates across turns: system prompt, tool definitions, conversation history, tool inputs and outputs. Stable content (system prompt, tool definitions, CLAUDE.md) is prompt cached. When the window nears its limit the SDK **auto-compacts** and emits a `system` message with subtype `compact_boundary`.",
+        "Because compaction summarizes older messages, early instructions may be lost. Put persistent rules in **CLAUDE.md** (re-injected every request) rather than only in the first prompt. A `PreCompact` hook can archive the transcript; `/compact` triggers it manually.",
+        "**Sessions**: capture `session_id` from the ResultMessage to **resume** (full context restored) or **fork** later. MCP tool definitions are deferred by default via tool search to save context.",
+        "The **memory tool** (`{\"type\": \"memory_20250818\", \"name\": \"memory\"}`) lets Claude persist information across conversations in `/memories`. It is **client-side**: Claude emits `tool_use` calls (commands: `view`, `create`, `str_replace`, `insert`, `delete`, `rename`), your app executes them against storage you control and returns `tool_result`. You must validate paths to prevent traversal (e.g. `/memories/../../secrets.env`). Pair it with context editing or compaction.",
+        "Long-running multi-session pattern: an **initializer** session creates a feature list (JSON, each failing), a progress file, an `init.sh` and a git commit; later sessions work one feature at a time, test end to end, update the progress log and commit, so each new context window can recover state."
+      ],
+      "example": {
+        "title": "Memory tool call round trip",
+        "language": "json",
+        "code": "// Tool definition (entire config)\n{\"type\": \"memory_20250818\", \"name\": \"memory\"}\n\n// Claude asks to look at its memory first\n{\"type\": \"tool_use\", \"id\": \"toolu_01C4\", \"name\": \"memory\",\n \"input\": {\"command\": \"view\", \"path\": \"/memories\"}}\n\n// YOUR app executes it and returns the listing\n{\"type\": \"tool_result\", \"tool_use_id\": \"toolu_01C4\",\n \"content\": \"Here're the files and directories up to 2 levels deep in /memories...\\n1.5K\\t/memories/progress.md\"}"
+      },
+      "examTips": [
+        "Memory tool = client-side: Anthropic does not store the data; you implement and secure storage.",
+        "Pick the technique: too much history = compaction; need info across sessions = memory / note-taking; noisy exploration = subagent; huge corpus = just-in-time retrieval.",
+        "Instructions that must survive compaction belong in CLAUDE.md, not only in the opening user prompt.",
+        "A subagent's tool calls stay out of the parent's context; only its final message returns.",
+        "Larger context is not automatically better: context rot degrades recall."
+      ],
+      "source": "https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents"
+    },
+    {
+      "heading": "Human-in-the-loop: permissions, hooks and approvals",
+      "notes": [
+        "Claude asks for human input in two situations: **permission to use a tool** and **clarifying questions** via the `AskUserQuestion` tool. Both invoke your `canUseTool` callback, which **pauses execution until you return**. The callback can stay pending indefinitely; for slow approvals use a `PreToolUse` hook returning the `defer` decision so the process can exit and resume later.",
+        "`canUseTool` returns **allow** (optionally with `updatedInput`, to modify the call, and `updatedPermissions` to remember a rule) or **deny** with a message Claude sees and may adapt to. You can also redirect entirely with streaming input.",
+        "Permission modes: `default` (callback decides), `acceptEdits` (auto-approve file edits), `plan` (explore and plan, no edits), `dontAsk` (deny anything not pre-approved; for headless), `auto` (model classifier reviews actions), `bypassPermissions` (no prompts; only for isolated environments).",
+        "Order matters: deny rules, permission mode and allow rules are checked **before** `canUseTool`. To run your own checks on calls a rule already allowed, use a **PreToolUse hook**, which can allow, deny or modify them.",
+        "`allowed_tools` auto-approves listed tools but does not remove others; `disallowed_tools` always blocks. Rules can be scoped like `Bash(npm *)`. A denied call returns a rejection as the tool result so Claude tries another approach.",
+        "Hooks (`PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `Stop`, `SubagentStart/Stop`, `PreCompact`, `PermissionRequest`) run in your app process, not the context window, so they cost no context.",
+        "Anthropic's agent guidance: agents may pause for human feedback at checkpoints or when encountering blockers, and human review remains important for coding agents even when tests verify output.",
+        "`AskUserQuestion`: 1-4 questions, each with 2-4 options (`label`, `description`) and `multiSelect`; return `answers` keyed by question text. If you restrict `tools`, include `AskUserQuestion` or Claude cannot ask."
+      ],
+      "example": {
+        "title": "canUseTool approval callback (TypeScript)",
+        "language": "typescript",
+        "code": "for await (const message of query({\n  prompt: 'Create a test file in /tmp and then delete it',\n  options: {\n    canUseTool: async (toolName, input) => {\n      if (toolName === 'AskUserQuestion') return handleQuestions(input);\n      const ok = await askUser(`Allow ${toolName}? ${JSON.stringify(input)}`);\n      return ok\n        ? { behavior: 'allow', updatedInput: input }      // run (optionally modified)\n        : { behavior: 'deny', message: 'User denied this action' }; // Claude sees this\n    }\n  }\n})) {\n  if ('result' in message) console.log(message.result);\n}"
+      },
+      "examTips": [
+        "canUseTool only fires for calls not already decided by deny rules, mode or allow rules. To intercept everything, use PreToolUse hooks.",
+        "bypassPermissions is only for CI/containers/isolated environments; plan mode is for review before changes; dontAsk suits headless agents with nobody to approve.",
+        "A deny message is fed back to Claude, so make it informative so Claude can suggest an alternative.",
+        "Human-in-the-loop is not just a final review: it includes mid-run approval gates and clarifying questions."
+      ],
+      "source": "https://code.claude.com/docs/en/agent-sdk/user-input"
+    },
+    {
+      "heading": "Claude Agent SDK architecture",
+      "notes": [
+        "The Agent SDK (Python and TypeScript) gives you the **same tools, agent loop and context management that power Claude Code**, programmable as a library. Both SDKs bundle a native Claude Code binary and run it as a process.",
+        "Pick the right product: **Agent SDK** (embed Claude Code's agent in your own app, in a process you run), **Claude Code CLI** (interactive terminal use), **Client SDK** (direct API; you write the tool loop or use the beta tool runner), **Managed Agents** (Anthropic hosts the agent harness and sandbox). For other languages, run the CLI with `-p` and `--output-format json`.",
+        "Capabilities: built-in tools (Read, Write, Edit, Bash, Glob, Grep, WebSearch, WebFetch, ToolSearch, Agent, Skill, AskUserQuestion, task tools), hooks, subagents, MCP, permissions, sessions, skills/commands/memory loaded from `.claude/` (via `settingSources`), and plugins.",
+        "The loop: receive prompt (yields `SystemMessage` init) -> Claude evaluates and may request tools (`AssistantMessage`) -> SDK executes tools (`UserMessage` with results) -> repeat -> final text-only `AssistantMessage` -> `ResultMessage`. A **turn** is one pass; the loop continues without returning control to your code until there are no tool calls.",
+        "Message types: `SystemMessage`, `AssistantMessage`, `UserMessage`, `StreamEvent` (partial messages), `ResultMessage`. Check `ResultMessage.subtype`: `success`, `error_max_turns`, `error_max_budget_usd`, `error_during_execution`, `error_max_structured_output_retries`. The `result` field exists only on success; the result also carries `stop_reason`, `total_cost_usd`, `usage`, `session_id`.",
+        "Controls: `max_turns` (counts tool-use turns plus the final text turn; default unlimited), `max_budget_usd`, `effort`, `model`, `allowed_tools`, `disallowed_tools`, `permission_mode`. A single-shot `query()` raises after yielding an error result, so wrap in try/except.",
+        "Parallel tools: read-only tools (Read, Glob, Grep, MCP tools with `readOnlyHint`) can run concurrently; state-modifying tools (Edit, Write, Bash) run sequentially. Custom tools default to sequential.",
+        "Custom tools and external systems are added via MCP servers or custom tool handlers. Anthropic notes third parties may not offer claude.ai login for agents built on the SDK; use API key authentication."
+      ],
+      "example": {
+        "title": "SDK agent with limits and result handling",
+        "language": "python",
+        "code": "async for message in query(\n    prompt='Find and fix the bug causing test failures in the auth module',\n    options=ClaudeAgentOptions(\n        allowed_tools=['Read', 'Edit', 'Bash', 'Glob', 'Grep'],  # auto-approved\n        setting_sources=['project'],   # load CLAUDE.md, skills, hooks\n        max_turns=30,                  # prevent runaway sessions\n        effort='high',\n    ),\n):\n    if isinstance(message, ResultMessage):\n        session_id = message.session_id\n        if message.subtype == 'success':\n            print(message.result)\n        elif message.subtype == 'error_max_turns':\n            print('Hit turn limit; resume', session_id)"
+      },
+      "examTips": [
+        "Agent SDK vs Client SDK: Agent SDK runs the loop and built-in tools for you; Client SDK means you write the loop (or use tool runner).",
+        "Check ResultMessage.subtype before reading .result; it exists only on success.",
+        "CLAUDE.md and skills load only when you set settingSources (e.g. 'project'), they are not on by default in the SDK.",
+        "max_turns hit gives error_max_turns with no final response; budget cap gives error_max_budget_usd."
+      ],
+      "source": "https://code.claude.com/docs/en/agent-sdk/agent-loop"
+    },
+    {
+      "heading": "Designing tools and agent-computer interfaces",
+      "notes": [
+        "Anthropic stresses crafting the **agent-computer interface (ACI)** as carefully as a human-computer interface: put effort into tool documentation and testing.",
+        "Give tool definitions example usage, edge cases, input format requirements and clear boundaries from other tools. Choose formats the model can write easily (avoid diffs needing exact line counts or code escaped inside JSON); give the model room to think before committing.",
+        "**Poka-yoke**: change arguments to make mistakes harder. In the SWE-bench agent, requiring absolute file paths fixed errors caused by relative paths after changing directory.",
+        "Test tools on many inputs, observe mistakes, and iterate. In the research system, Claude rewriting a flawed tool description reduced task completion time by 40%.",
+        "Keep tool sets minimal and distinct; every tool definition consumes context. Scope subagent tools to the minimum with the `tools` field.",
+        "Agents suited in practice: **customer support** (conversational plus tool actions like refunds, success measured by resolution) and **coding agents** (verifiable with automated tests, iterate on feedback)."
+      ],
+      "example": {
+        "title": "Mistake-proofing a tool schema",
+        "language": "json",
+        "code": "{\n  \"name\": \"edit_file\",\n  \"description\": \"Replace text in a file. file_path MUST be absolute (e.g. /repo/src/app.py). Use view_file first if unsure of exact text. Not for creating files; use create_file.\",\n  \"input_schema\": {\n    \"type\": \"object\",\n    \"properties\": {\n      \"file_path\": {\"type\": \"string\", \"description\": \"Absolute path starting with /\"},\n      \"old_str\": {\"type\": \"string\"},\n      \"new_str\": {\"type\": \"string\"}\n    },\n    \"required\": [\"file_path\", \"old_str\", \"new_str\"]\n  }\n}"
+      },
+      "examTips": [
+        "If an agent keeps misusing a tool, the first fix is better tool descriptions/schemas (ACI), not a bigger model or more agents.",
+        "Poka-yoke = redesign the interface so the error is hard to make (absolute paths).",
+        "Too many overlapping tools confuses the model and burns context."
+      ],
+      "source": "https://www.anthropic.com/engineering/building-effective-agents"
+    },
+    {
+      "heading": "Stopping conditions, cost control and reliability",
+      "notes": [
+        "Agents operate autonomously, so costs and compounding errors rise. Anthropic recommends **stopping conditions** such as a maximum iteration count, plus extensive testing in sandboxed environments and guardrails.",
+        "In the SDK: `max_turns` caps turns, `max_budget_usd` caps estimated spend (subagent spend counts; spawning more subagents then fails with 'Budget limit reached'). The response that crosses the cap still completes, so leave headroom.",
+        "`usage` on a ResultMessage covers only the main loop; use `model_usage` for whole-tree token and cost accounting including subagents.",
+        "Manual loops need their own guard (e.g. a `for` loop with an iteration limit), plus handling of `max_tokens`, `pause_turn` and `refusal`.",
+        "Reliability: return errors via `is_error`, make agents resumable via sessions/checkpoints, and trace agent decision patterns in production. Evaluate end state/outcomes rather than exact paths; start with about 20 realistic test queries and use LLM-as-judge plus human testing.",
+        "Use lower `effort` for simple, well-scoped agent tasks to cut latency and cost; effort is separate from extended thinking."
+      ],
+      "example": {
+        "title": "Handling every ResultMessage outcome",
+        "language": "python",
+        "code": "if isinstance(message, ResultMessage):\n    match message.subtype:\n        case 'success':\n            print(message.result)\n        case 'error_max_turns':\n            print('Out of turns. Resume session', message.session_id, 'with a higher limit')\n        case 'error_max_budget_usd':\n            print('Budget cap reached; spent', message.total_cost_usd)\n        case 'error_during_execution':\n            print('Run interrupted; stop_reason =', message.stop_reason)"
+      },
+      "examTips": [
+        "Unbounded loops are an anti-pattern: always include max turns/iterations or a budget.",
+        "error_max_turns means no final result text; resume the session to continue.",
+        "Evaluate outcomes, not exact tool-call sequences, because valid agent paths vary."
+      ],
+      "source": "https://code.claude.com/docs/en/agent-sdk/agent-loop"
+    },
+    {
+      "heading": "Choosing an architecture: decision guide",
+      "notes": [
+        "Step 1: try a **single LLM call** with good prompting, retrieval and examples. Step 2: if the task has fixed, known steps, use a **workflow** (chain, route, parallelize). Step 3: if steps are unpredictable and flexibility is needed, use an **agent** loop. Step 4: if work is large, parallelizable and breadth-first, use **orchestrator + subagents**.",
+        "Add a **human checkpoint** for irreversible or high-risk actions (deleting files, refunds, deploys) using permission modes, PreToolUse hooks or `canUseTool`.",
+        "Pick **Agent SDK** when you want Claude Code's built-in tools, hooks, permissions and sessions in your own process; **Client SDK + tool runner** for custom minimal loops; **Managed Agents** when Anthropic should host the harness and sandbox.",
+        "Long tasks that exceed one context window need state outside the window: memory tool or note files, progress logs, git commits, and compaction.",
+        "Principles to remember: keep design simple, make planning steps transparent, and invest in the agent-computer interface; only add complexity when measured results show improvement."
+      ],
+      "example": {
+        "title": "Decision walkthrough",
+        "language": "text",
+        "code": "Q: Summarize one PDF into 5 bullets.            -> single LLM call\nQ: Classify email then draft category reply.     -> routing workflow\nQ: Review a PR for style, security, coverage.    -> parallel subagents (sectioning)\nQ: Fix failing tests, unknown files involved.    -> agent loop (tools + ground truth)\nQ: Research 40 competitors across the web.       -> orchestrator + parallel subagents, memory for plan\nQ: Delete stale cloud resources.                 -> agent + human approval (canUseTool / PreToolUse)"
+      },
+      "examTips": [
+        "Over-engineering is the typical wrong answer: if a prompt chain solves it, do not build an agent.",
+        "Tightly coupled tasks needing shared context favor a single agent; breadth-first parallel research favors multi-agent.",
+        "High-risk actions need explicit human approval gates, regardless of how capable the model is."
+      ],
+      "source": "https://www.anthropic.com/engineering/building-effective-agents"
+    },
+    {
+      "heading": "Long-running agent harnesses across context windows",
+      "notes": [
+        "Each new session starts without memory of earlier work, so Anthropic describes a two-part harness: an **initializer agent** and a **coding agent** that makes incremental progress each session.",
+        "The initializer writes a **feature list** (JSON, every feature initially failing), an `init.sh` to start the dev environment, a **progress file**, and an initial **git commit**.",
+        "Each later session works on **one feature at a time**, tests it, updates the progress log and commits, leaving the codebase in a clean state. Agents may only flip a `passes` flag in the JSON, since models are less likely to corrupt JSON than Markdown.",
+        "Observed failure modes: trying to do everything at once, declaring victory too early, marking features done without proper verification, and wasting time figuring out how to run the app. Each had a matching fix in setup or routine.",
+        "Test end to end as a human user would (browser automation) rather than relying solely on unit tests or `curl`. Git history lets agents revert bad changes and recover working states."
+      ],
+      "example": {
+        "title": "Session start routine (conceptual)",
+        "language": "bash",
+        "code": "pwd                       # confirm working directory\ncat progress.md           # what was done, what is next\ngit log --oneline -10     # recent commits\n./init.sh                 # start dev server\n# run basic end-to-end check, THEN pick ONE failing feature from features.json\n# implement -> test e2e -> set passes=true -> update progress.md -> git commit"
+      },
+      "examTips": [
+        "Memory persists state ACROSS sessions; compaction manages state WITHIN a long session.",
+        "Marking a feature complete requires end-to-end verification, not just written code.",
+        "Work on one feature per session to avoid half-implemented, undocumented work."
+      ],
+      "source": "https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents"
+    }
+  ],
+  "keyTakeaways": [
+    "Anthropic: workflows follow predefined code paths; agents let the LLM dynamically direct its own process and tool use.",
+    "An agent is essentially an LLM using tools based on environmental feedback in a loop; start with the simplest solution and add complexity only when it measurably helps.",
+    "stop_reason == 'tool_use' means run the tool(s) and send back tool_result blocks; 'end_turn' means Claude is done; the loop ends when there are no tool calls.",
+    "Every tool_result must carry the matching tool_use_id, sit in a user message directly after the assistant turn, and come before any text in that message.",
+    "Use is_error: true with an instructive message for tool failures; Claude can then recover or adapt.",
+    "Always set stopping conditions (max iterations/max_turns, budget) in production agents; the SDK reports error_max_turns and error_max_budget_usd.",
+    "Orchestrator-workers differs from parallelization: subtasks are decided dynamically by the orchestrator, not predefined.",
+    "Subagents give context isolation: only the subagent's final message returns to the parent, and the parent's history is not passed down (only the Agent tool prompt string is).",
+    "Context is finite (context rot); manage it with compaction, structured note-taking/memory, subagents and just-in-time retrieval.",
+    "The memory tool is client-side: Claude requests file operations under /memories and your app executes them (type memory_20250818).",
+    "Human-in-the-loop in the SDK = permission modes + allow/deny rules + hooks + canUseTool callback (and AskUserQuestion); the callback can stay pending indefinitely.",
+    "The Agent SDK embeds the same loop, built-in tools, hooks, subagents, MCP, permissions and sessions that power Claude Code; the Client SDK makes you write the loop (or use the tool runner)."
+  ],
+  "glossary": [
+    {
+      "term": "Agent",
+      "definition": "A system where the LLM dynamically directs its own process and tool usage, maintaining control over how it accomplishes a task (Anthropic's definition)."
+    },
+    {
+      "term": "Workflow",
+      "definition": "A system where LLMs and tools are orchestrated through predefined code paths."
+    },
+    {
+      "term": "Agentic system",
+      "definition": "Umbrella term covering both workflows and agents."
+    },
+    {
+      "term": "Augmented LLM",
+      "definition": "Basic building block: an LLM enhanced with retrieval, tools and memory."
+    },
+    {
+      "term": "Agentic loop / tool-use loop",
+      "definition": "Cycle of Claude responding, requesting tools, receiving results, and repeating until a response contains no tool calls."
+    },
+    {
+      "term": "stop_reason",
+      "definition": "Field on every successful Messages API response explaining why generation stopped (end_turn, tool_use, max_tokens, stop_sequence, pause_turn, refusal, model_context_window_exceeded)."
+    },
+    {
+      "term": "tool_use block",
+      "definition": "Assistant content block with id, name and input requesting a client tool call."
+    },
+    {
+      "term": "tool_result block",
+      "definition": "User-message content block returning a tool's output, linked by tool_use_id; supports is_error."
+    },
+    {
+      "term": "pause_turn",
+      "definition": "stop_reason when a server-tool loop hits its iteration limit; resend the assistant content unchanged to continue."
+    },
+    {
+      "term": "Prompt chaining",
+      "definition": "Workflow splitting a task into sequential LLM steps with optional programmatic gates."
+    },
+    {
+      "term": "Routing",
+      "definition": "Workflow that classifies an input and directs it to a specialized follow-up task."
+    },
+    {
+      "term": "Parallelization",
+      "definition": "Workflow running LLM calls simultaneously: sectioning (independent subtasks) or voting (same task repeated)."
+    },
+    {
+      "term": "Orchestrator-workers",
+      "definition": "A central LLM dynamically breaks down a task, delegates to worker LLMs and synthesizes results."
+    },
+    {
+      "term": "Evaluator-optimizer",
+      "definition": "One LLM generates, another evaluates and gives feedback, iterating in a loop."
+    },
+    {
+      "term": "Subagent",
+      "definition": "Separate agent instance spawned by a main agent for a focused subtask, with its own fresh context."
+    },
+    {
+      "term": "AgentDefinition",
+      "definition": "SDK config for a subagent: description, prompt, tools, model, and more."
+    },
+    {
+      "term": "Context rot",
+      "definition": "Degradation in recall accuracy as the number of tokens in the context window grows."
+    },
+    {
+      "term": "Compaction",
+      "definition": "Summarizing older conversation history to free context space while keeping key decisions."
+    },
+    {
+      "term": "Structured note-taking",
+      "definition": "Agent writes notes to storage outside the context window (e.g. NOTES.md, to-do list) and reloads them later."
+    },
+    {
+      "term": "Just-in-time retrieval",
+      "definition": "Keeping lightweight references (paths, queries) and loading data with tools at runtime instead of preloading."
+    },
+    {
+      "term": "Memory tool",
+      "definition": "Client-side Anthropic-defined tool (memory_20250818) letting Claude view/create/edit files under /memories across sessions."
+    },
+    {
+      "term": "canUseTool",
+      "definition": "SDK callback fired when a tool needs approval or Claude asks a clarifying question; returns allow or deny."
+    },
+    {
+      "term": "Permission mode",
+      "definition": "SDK setting (default, acceptEdits, plan, dontAsk, auto, bypassPermissions) controlling how much human oversight tool calls get."
+    },
+    {
+      "term": "Hook",
+      "definition": "Callback in your app process that fires at lifecycle points (PreToolUse, PostToolUse, Stop, etc.) and can block or modify actions."
+    },
+    {
+      "term": "ResultMessage",
+      "definition": "Final SDK message that ends the loop, with subtype, result text, cost, usage and session_id."
+    },
+    {
+      "term": "Agent-computer interface (ACI)",
+      "definition": "Anthropic's term for carefully designed tool documentation and formats so the model uses tools reliably."
+    }
+  ],
+  "quiz": [
+    {
+      "q": "A developer's loop sends a request with tools and receives a response with stop_reason 'tool_use' containing one tool_use block. What must the next request contain?",
+      "options": [
+        "An assistant message with the tool output, then re-send the original prompt",
+        "A user message whose content begins with a tool_result block carrying the matching tool_use_id, after appending the assistant turn to the history",
+        "A 'tool' role message with the function result",
+        "A new system prompt describing the tool output"
+      ],
+      "answer": 1,
+      "explanation": "Claude's API has no 'tool' role. Tool results go in a user message as tool_result blocks keyed by tool_use_id, following the assistant turn that requested them. Other options use roles or placements the API does not support.",
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls"
+    },
+    {
+      "q": "An agent using the server-side web search tool returns stop_reason 'pause_turn'. What is the correct handling?",
+      "options": [
+        "Treat it as an error and abort",
+        "Append the assistant content unchanged and send the request again",
+        "Add a user message saying 'continue' with text only",
+        "Switch to a model with a larger context window"
+      ],
+      "answer": 1,
+      "explanation": "pause_turn indicates the server-tool loop hit its iteration limit (default 10). Resend the assistant content as is (including any container id) to let it continue. Adding text or changing models is not the documented fix.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons"
+    },
+    {
+      "q": "After returning tool results, your agent frequently gets an empty end_turn response (a couple of tokens). Which is the most likely cause and fix?",
+      "options": [
+        "max_tokens is too low; double it",
+        "Text blocks were added right after the tool_result blocks; send only the tool_result",
+        "The tool_use_id was reused; generate new ids",
+        "The model needs a larger context window"
+      ],
+      "answer": 1,
+      "explanation": "Adding text immediately after tool_result blocks teaches a pattern of user input after each tool use, causing Claude to end its turn. Send only tool_result blocks. Retrying with the empty response is also discouraged.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons"
+    },
+    {
+      "q": "A tool throws a network exception while your code executes it. What is the best way to report this to Claude?",
+      "options": [
+        "Crash the loop and show the stack trace to the user",
+        "Return a tool_result with is_error true and an instructive message such as what failed and what to try next",
+        "Omit the tool_result and continue",
+        "Return an empty string as a successful result"
+      ],
+      "answer": 1,
+      "explanation": "Set is_error: true with a descriptive message so Claude can recover or adapt. Omitting the result breaks the tool_use/tool_result pairing (400 error), and empty success hides the failure.",
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls"
+    },
+    {
+      "q": "A team needs to support three ticket categories (billing, technical, refunds) with different specialized prompts. The category is easy to determine from the message. Which Anthropic workflow pattern fits best?",
+      "options": [
+        "Evaluator-optimizer",
+        "Orchestrator-workers",
+        "Routing",
+        "Voting parallelization"
+      ],
+      "answer": 2,
+      "explanation": "Routing classifies an input and directs it to a specialized follow-up task. Orchestrator-workers is for dynamically decided subtasks, evaluator-optimizer for iterative refinement, and voting for repeated runs of the same task.",
+      "source": "https://www.anthropic.com/engineering/building-effective-agents"
+    },
+    {
+      "q": "A coding assistant must implement a feature that may modify anywhere from one to dozens of files, and the set of files cannot be known in advance. Which pattern is most appropriate?",
+      "options": [
+        "Prompt chaining with fixed steps",
+        "Parallelization with predefined sectioning",
+        "Orchestrator-workers",
+        "A single LLM call with retrieval"
+      ],
+      "answer": 2,
+      "explanation": "Orchestrator-workers lets a central LLM dynamically decide subtasks and delegate. Predefined chains or sectioning cannot adapt to an unknown number of files.",
+      "source": "https://www.anthropic.com/engineering/building-effective-agents"
+    },
+    {
+      "q": "A startup wants to summarize support emails into short tags. Latency and cost matter, and the task is simple. According to Anthropic's guidance, what should they do first?",
+      "options": [
+        "Build an autonomous multi-agent system for flexibility",
+        "Start with the simplest solution, such as one well-prompted LLM call, and add complexity only if measured results justify it",
+        "Use an orchestrator with five workers",
+        "Adopt a framework to hide prompts"
+      ],
+      "answer": 1,
+      "explanation": "Anthropic recommends the simplest solution that works; agents trade latency and cost for performance and are not always warranted. Frameworks can also obscure prompts and make debugging harder.",
+      "source": "https://www.anthropic.com/engineering/building-effective-agents"
+    },
+    {
+      "q": "You are building a research agent that fans out to many parallel searches. What is a documented tradeoff of the multi-agent approach?",
+      "options": [
+        "It reduces token usage compared with a single agent",
+        "It uses substantially more tokens (about 15x chat), so it suits high-value, parallelizable tasks",
+        "It cannot run in parallel",
+        "It eliminates the need for evaluation"
+      ],
+      "answer": 1,
+      "explanation": "Anthropic reports agents use about 4x and multi-agent systems about 15x the tokens of chat, so the approach is justified for high-value, parallelizable tasks, not tightly coupled ones.",
+      "source": "https://www.anthropic.com/engineering/multi-agent-research-system"
+    },
+    {
+      "q": "In the Claude Agent SDK, a main agent delegates a code review to a subagent. What does the subagent receive from the parent?",
+      "options": [
+        "The full conversation history and all prior tool results",
+        "Only its own system prompt plus the prompt string passed through the Agent tool (and project CLAUDE.md and tool definitions)",
+        "The parent's system prompt and preloaded skills",
+        "Nothing, including no prompt"
+      ],
+      "answer": 1,
+      "explanation": "A non-fork subagent starts fresh; the only parent-to-subagent channel is the Agent tool's prompt string, so include needed paths and decisions there. It does not inherit history, tool results or the parent's system prompt.",
+      "source": "https://code.claude.com/docs/en/agent-sdk/subagents"
+    },
+    {
+      "q": "An engineer wants a subagent that can analyze code but never modify files or run commands. How should the subagent be configured in the SDK?",
+      "options": [
+        "Set permission_mode to bypassPermissions",
+        "Define it with AgentDefinition tools limited to Read, Grep and Glob",
+        "Tell it in the prompt not to edit files, and leave tools unset",
+        "Set max_turns to 1"
+      ],
+      "answer": 1,
+      "explanation": "The tools field restricts the subagent to the listed tools; omitted tools do not exist in its session. Prompt-only restrictions are not enforced, bypassPermissions removes safeguards, and max_turns only limits length.",
+      "source": "https://code.claude.com/docs/en/agent-sdk/subagents"
+    },
+    {
+      "q": "A long-running agent session keeps forgetting a rule given in the first user message after the SDK auto-compacts the conversation. Where should the persistent rule live?",
+      "options": [
+        "In an earlier tool result",
+        "In CLAUDE.md loaded through settingSources, which is re-injected on every request",
+        "In a PostToolUse hook's logs",
+        "In the max_turns setting"
+      ],
+      "answer": 1,
+      "explanation": "Compaction summarizes older messages and can drop early instructions; CLAUDE.md content is included on every request (and prompt cached). The other options do not carry instructions into context.",
+      "source": "https://code.claude.com/docs/en/agent-sdk/agent-loop"
+    },
+    {
+      "q": "A team implements Claude's memory tool. Which statement is correct?",
+      "options": [
+        "Anthropic stores memory files on its servers automatically",
+        "Claude requests file operations under /memories and the application executes them, so the application must validate paths against traversal",
+        "The memory tool requires a server-side beta container",
+        "Memory persists only within a single conversation"
+      ],
+      "answer": 1,
+      "explanation": "The memory tool is client-side: your handler runs view/create/str_replace/insert/delete/rename against storage you control, and must reject paths outside /memories. It is designed to persist across conversations.",
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/memory-tool"
+    },
+    {
+      "q": "An agent must be able to ask the user which database to use mid-run, and also get approval before running destructive shell commands. Which SDK mechanism covers both?",
+      "options": [
+        "PostToolUse hook",
+        "The canUseTool callback, which handles tool approvals and AskUserQuestion requests",
+        "max_budget_usd",
+        "Setting permission_mode to bypassPermissions"
+      ],
+      "answer": 1,
+      "explanation": "Both permission requests and AskUserQuestion clarifying questions trigger canUseTool, which pauses execution until your callback returns. PostToolUse runs after the tool, budget limits spend, and bypassPermissions removes approvals.",
+      "source": "https://code.claude.com/docs/en/agent-sdk/user-input"
+    },
+    {
+      "q": "An SDK run ends with a ResultMessage whose subtype is 'error_max_turns'. What is true?",
+      "options": [
+        "The result field contains the final answer",
+        "The loop hit the max_turns limit before finishing and there is no final result text; the session can be resumed",
+        "The model refused the request",
+        "The budget was exceeded"
+      ],
+      "answer": 1,
+      "explanation": "error_max_turns means the turn cap was reached; the result field exists only on success. Budget exhaustion is error_max_budget_usd and refusals show in stop_reason.",
+      "source": "https://code.claude.com/docs/en/agent-sdk/agent-loop"
+    },
+    {
+      "q": "Claude emits three tool_use blocks in one assistant turn: two independent file reads and one database write. How should the application respond?",
+      "options": [
+        "Return one tool_result only for the write",
+        "Run as appropriate (reads may run concurrently, the write sequentially) and return a tool_result for every tool_use block in one user message",
+        "Disable parallel tool use permanently",
+        "Return tool_results in separate user messages, one per call"
+      ],
+      "answer": 1,
+      "explanation": "Every tool_use needs a matching tool_result, and all results belong in a single user message after the assistant turn. Execution order is up to you: independent read-only calls can be parallel, side-effecting ones sequential.",
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/parallel-tool-use"
+    }
+  ]
+}

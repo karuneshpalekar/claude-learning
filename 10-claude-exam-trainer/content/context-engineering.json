@@ -1,0 +1,464 @@
+{
+  "slug": "context-engineering",
+  "title": "Context Engineering",
+  "overview": "Context engineering is the practice of curating everything that enters a model's context window (system prompt, tools, retrieved data, message history) so the agent has the smallest set of high-signal tokens needed to succeed. It matters because accuracy and recall degrade as context grows (context rot), even in 1M-token windows. The exam tests the strategic concepts (altitude, just-in-time retrieval, compaction, note-taking, sub-agents) and the concrete API features that implement them (context windows, compaction, context editing, the memory tool) plus Claude Code's context controls.",
+  "sources": [
+    {"title": "Effective context engineering for AI agents", "url": "https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents"},
+    {"title": "Context windows", "url": "https://platform.claude.com/docs/en/build-with-claude/context-windows"},
+    {"title": "Context editing", "url": "https://platform.claude.com/docs/en/build-with-claude/context-editing"},
+    {"title": "Compaction overview", "url": "https://platform.claude.com/docs/en/build-with-claude/compaction"},
+    {"title": "Compaction at a token threshold", "url": "https://platform.claude.com/docs/en/build-with-claude/compaction-threshold"},
+    {"title": "Compaction on demand", "url": "https://platform.claude.com/docs/en/build-with-claude/compaction-on-demand"},
+    {"title": "Memory tool", "url": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/memory-tool"},
+    {"title": "Prompting best practices (long context prompting, multiwindow workflows)", "url": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices"},
+    {"title": "Explore the context window (Claude Code)", "url": "https://code.claude.com/docs/en/context-window"},
+    {"title": "Manage costs effectively (Claude Code)", "url": "https://code.claude.com/docs/en/costs"}
+  ],
+  "sections": [
+    {
+      "heading": "Context engineering vs prompt engineering",
+      "notes": [
+        "**Prompt engineering** is mostly about writing and organizing instructions. **Context engineering** is the broader job of curating *all* tokens available at inference: system instructions, tools, external data, Model Context Protocol (MCP) content, and message history.",
+        "It is iterative: because an agent runs in a loop, the context is re-curated on every model call, not written once.",
+        "Guiding principle from Anthropic: find the **smallest possible set of high-signal tokens** that makes the desired outcome most likely.",
+        "As models get more capable they need less prescriptive engineering, but treating context as scarce stays central."
+      ],
+      "examTips": [
+        "If a question asks which discipline covers tools, retrieved data and history in addition to the prompt, the answer is context engineering, not prompt engineering.",
+        "More context is not automatically better; the goal is relevance density, not volume."
+      ],
+      "source": "https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents"
+    },
+    {
+      "heading": "Context as a finite resource and context rot",
+      "notes": [
+        "**Context rot**: as the number of tokens grows, the model's accuracy and recall degrade. Seen in needle-in-a-haystack style benchmarks across all models.",
+        "Think of an **attention budget**: every new token draws it down, giving diminishing returns.",
+        "Causes are architectural: transformer attention forms pairwise relationships among all tokens (n squared), and training data skews toward shorter sequences. Position-encoding tricks extend length but cost some precision.",
+        "Result is a **performance gradient, not a hard cliff**: models stay capable at long context but get less precise.",
+        "Everything in the request counts toward the window: system prompt, every message (including tool results, images, documents), tool definitions, and the output including extended thinking.",
+        "Larger windows do not remove the need for curation: context pollution persists even in big windows."
+      ],
+      "examTips": [
+        "Do not answer 'upgrade to a 1M window' as the fix for degraded long-running agent quality; the docs say curating what is in context matters as much as capacity.",
+        "Context rot is a gradual degradation, not a sudden failure at the limit."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/context-windows"
+    },
+    {
+      "heading": "Anatomy of effective context: system prompts (altitude), tools, examples",
+      "notes": [
+        "**Right altitude** for system prompts: specific enough to guide behavior, flexible enough to give the model heuristics. Two failure modes: brittle hardcoded if-else logic (too low) and vague high-level guidance that assumes shared context (too high).",
+        "Organize prompts into distinct sections with XML tags or Markdown headers. Aim for minimal but complete information (minimal does not mean short).",
+        "Workflow: start with a minimal prompt on the best model, then add instructions and examples based on observed failure modes.",
+        "**Tools**: self-contained, robust to error, clearly intended, non-overlapping, with token-efficient return values. A bloated tool set with ambiguous choices is a common failure. If a human engineer cannot say which tool to use, the agent cannot either.",
+        "**Examples**: curate a small set of diverse, canonical few-shot examples rather than stuffing in a laundry list of edge cases."
+      ],
+      "example": {
+        "title": "Altitude spectrum for a support agent prompt",
+        "language": "text",
+        "code": "TOO LOW (brittle):\n  If the user says 'refund' and order_age < 30 and amount < 100, call issue_refund.\n  If the user says 'money back' ... (50 more branches)\n\nTOO HIGH (vague):\n  Be a helpful support agent.\n\nRIGHT ALTITUDE:\n  <role>You resolve billing issues for Acme.</role>\n  <principles>Verify the order before acting. Prefer the lowest-cost fix that satisfies the customer. Escalate when policy is unclear.</principles>\n  <tools_guidance>Use lookup_order before any change. Use issue_refund only after verification.</tools_guidance>"
+      },
+      "examTips": [
+        "Altitude is about the *level of specificity* of instructions: avoid both extremes.",
+        "Fix tool-selection errors by reducing overlap and ambiguity in the tool set, not by adding more tools."
+      ],
+      "source": "https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents"
+    },
+    {
+      "heading": "Just-in-time retrieval, progressive disclosure and hybrid strategies",
+      "notes": [
+        "Classic approach: embedding-based retrieval pre-computed **before** inference. Newer agentic approach: **just-in-time** retrieval, where the agent keeps lightweight identifiers (file paths, stored queries, web links) and loads data with tools at runtime only when needed.",
+        "Claude Code works this way: it issues targeted queries and uses commands like `head` and `tail` to analyze large data without loading it all into context.",
+        "Metadata (folder hierarchy, naming conventions, timestamps) gives signals about relevance; the same filename means different things in `tests/` vs `src/`.",
+        "**Progressive disclosure**: the agent discovers context layer by layer, and each interaction informs the next step; it keeps only what is necessary in working memory.",
+        "Trade-offs: runtime exploration is slower than precomputed retrieval and needs well-designed tools and heuristics, otherwise the agent wastes context on dead ends.",
+        "**Hybrid**: pre-load some data up front for speed and let the agent explore further at its discretion. Claude Code loads CLAUDE.md files up front and uses glob and grep just-in-time. Hybrid suits less dynamic content (for example legal or finance).",
+        "General advice: do the simplest thing that works."
+      ],
+      "examTips": [
+        "Hybrid = some upfront loading plus autonomous exploration; Claude Code's CLAUDE.md plus grep/glob is the canonical example.",
+        "Just-in-time retrieval keeps references (paths, queries) in context rather than the full content."
+      ],
+      "source": "https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents"
+    },
+    {
+      "heading": "Long-horizon techniques: compaction, structured note-taking, sub-agents",
+      "notes": [
+        "Tasks spanning tens of minutes to hours (large migrations, research) exceed any window, so three techniques are used.",
+        "**Compaction**: summarize a conversation nearing the limit and restart a new window with the summary. Claude Code keeps architectural decisions, unresolved bugs and implementation details, discards redundant tool output, and keeps the five most recently accessed files. Tune for **recall first, then precision**. The lightest form is clearing old tool results.",
+        "**Structured note-taking (agentic memory)**: the agent writes notes persisted outside the context window (to-do list, NOTES.md) and pulls them back later. Example in the article: Claude playing Pokemon tracked progress and maps over thousands of steps and resumed after context resets. The memory tool is the platform feature for this.",
+        "**Sub-agent architectures**: specialized sub-agents work on focused tasks in clean context windows, may use tens of thousands of tokens, and return a condensed summary (roughly 1,000 to 2,000 tokens) to a lead agent. This separates detailed search context from synthesis context.",
+        "**Which to use**: compaction for extensive back-and-forth conversation; note-taking for iterative development with clear milestones; multi-agent for complex research where parallel exploration pays off."
+      ],
+      "example": {
+        "title": "Choosing a long-horizon technique",
+        "language": "text",
+        "code": "Long chat with a user, many turns, flow must feel continuous  -> compaction\nMulti-day refactor with milestones, resumes after resets       -> note-taking (progress file / memory tool)\nBroad research with many independent searches                  -> sub-agents returning ~1-2k token summaries"
+      },
+      "examTips": [
+        "Sub-agents protect the lead agent's context: heavy exploration happens in their windows and only a distilled summary returns.",
+        "Compaction tuning: maximize recall of important details first, then trim superfluous content for precision.",
+        "Note-taking persists state outside the window; compaction condenses state inside the window."
+      ],
+      "source": "https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents"
+    },
+    {
+      "heading": "Context windows: sizes, thinking, awareness and overflow",
+      "notes": [
+        "Many current models (for example Claude Opus 4.6 and later, Sonnet 4.6 and later, Haiku 5.5, Fable and Mythos) have a **1M-token** window by default with no beta header; other models, such as the deprecated Sonnet 4.5, have 200k. A request can generate up to 128k output tokens on the 1M models.",
+        "Prior turns accumulate: each turn's input is all earlier history plus the new message; output becomes input of the next turn.",
+        "With thinking, thinking tokens count toward the window and are a subset of `max_tokens`, billed as output. Newer models keep previous thinking blocks by default; older ones strip them automatically. You must return the unmodified thinking block (with signature) alongside tool results during a tool-use cycle.",
+        "**Context awareness**: Sonnet 5, Sonnet 4.6 and Haiku 4.5 (and Sonnet 4.5) track their remaining budget; the API injects `<budget:token_budget>` in the system prompt and `<system_warning>Token usage: X/Y; Z remaining</system_warning>` after tool calls. You never send these yourself. Newer models (Opus 4.7+, Sonnet 5.5, etc.) do not get the tags; use task budgets (beta) instead.",
+        "**Overflow**: if input alone exceeds the window the API returns a 400 `invalid_request_error`. On Claude 4.5 and newer, input plus `max_tokens` over the window is accepted and generation stops with `stop_reason: \"model_context_window_exceeded\"`.",
+        "Use the **token counting API** to estimate before sending. Prompt-cached prefixes still occupy the window: caching changes cost, not whether tokens count.",
+        "Defer or reduce tool definition tokens with the tool search tool / manage-tool-context guidance."
+      ],
+      "examTips": [
+        "Cached tokens (`cache_read_input_tokens`, `cache_creation_input_tokens`) all count toward the context window.",
+        "You never inject context-awareness tags yourself; the API does.",
+        "Over-window input is a hard 400; input plus max_tokens over the window on 4.5+ models just stops with `model_context_window_exceeded`."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/context-windows"
+    },
+    {
+      "heading": "Server-side compaction",
+      "notes": [
+        "Docs name server-side compaction the primary strategy for long-running conversations and agents. It replaces older turns with a summary Claude writes on the server, so you write no summarization code. It is beta on current models.",
+        "Two flavors: **compaction at a token threshold** (the API compacts inside ordinary requests when input reaches a trigger; beta header `compact-2026-01-12`; edit type `compact_20260112` in `context_management.edits`) and **compaction on demand** (your app decides when; beta header `compact-2026-09-04`; top-level `compaction` parameter; the returned compaction block goes first in `messages` in place of the summarized messages).",
+        "Threshold parameters: `trigger` defaults to 150,000 input tokens (`input_tokens` is the only type, minimum value 50,000); `pause_after_compaction` default false; `instructions` **replaces** the default summarization prompt entirely.",
+        "When compaction fires, the response begins with a `compaction` block holding the summary. On later requests the API ignores all blocks before the last compaction block, so you can keep appending the full list.",
+        "With `pause_after_compaction: true` the response stops with `stop_reason: \"compaction\"`, letting you re-insert recent turns. Billed usage appears in `usage.iterations`; top-level token counts exclude compaction iterations.",
+        "Alternative if you want a manual summarizer: client-side compaction in your own code. SDK `compaction_control` helper is deprecated in favor of server-side compaction."
+      ],
+      "example": {
+        "title": "Enable threshold compaction (Python)",
+        "language": "python",
+        "code": "import anthropic\nclient = anthropic.Anthropic()\nmessages = [{\"role\": \"user\", \"content\": \"Help me build a website\"}]\n\nresponse = client.beta.messages.create(\n    betas=[\"compact-2026-01-12\"],\n    model=\"claude-opus-5-5\",\n    max_tokens=4096,\n    messages=messages,\n    context_management={\"edits\": [{\"type\": \"compact_20260112\"}]},\n)\n# Append the whole content (including any compaction block) to continue\nmessages.append({\"role\": \"assistant\", \"content\": response.content})"
+      },
+      "examTips": [
+        "Compaction summarizes (lossy, whole-conversation); context editing clears by rule (tool results, thinking). Pick compaction for most long conversations.",
+        "Custom `instructions` replace, not append to, the default summary prompt.",
+        "Always append the full assistant content so the compaction block is preserved; do not strip it."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/compaction-threshold"
+    },
+    {
+      "heading": "Context editing: tool result and thinking block clearing",
+      "notes": [
+        "Context editing automatically clears chosen content from history as it grows. Beta header `context-management-2025-06-27`. Edits are applied **server-side** before the prompt reaches Claude; your client keeps the full unmodified history and does not need to sync.",
+        "**Tool result clearing** (`clear_tool_uses_20250919`): clears the oldest tool results once the threshold is hit, replacing them with placeholder text; tool calls stay visible by default.",
+        "Parameters: `trigger` (default 100,000 input tokens; `input_tokens` or `tool_uses`), `keep` (default 3 recent tool use/result pairs), `clear_at_least` (minimum tokens to clear; if unmet the edit is not applied; justifies cache invalidation), `exclude_tools` (never clear these tools' results), `clear_tool_inputs` (default false; also clears call parameters).",
+        "**Thinking block clearing** (`clear_thinking_20251015`): `keep` is `{\"type\": \"thinking_turns\", \"value\": N}` (N > 0, default 1) or `\"all\"` (maximizes cache hits). If combining both strategies, list `clear_thinking_20251015` **first**.",
+        "Prompt caching: clearing tool results invalidates the cached prefix, so use `clear_at_least` to make each clear worth the cache rewrite. Keeping thinking preserves the cache.",
+        "Response includes `context_management.applied_edits` (for example `cleared_tool_uses`, `cleared_input_tokens`). `count_tokens` accepts the same config and returns `original_input_tokens` so you can preview savings.",
+        "Pairs with the memory tool: as clearing approaches, Claude is warned to save important info to memory first."
+      ],
+      "example": {
+        "title": "Tool result clearing with exclusions",
+        "language": "python",
+        "code": "response = client.beta.messages.create(\n    model=\"claude-opus-5-5\",\n    max_tokens=4096,\n    messages=[{\"role\": \"user\", \"content\": \"Create a simple command line calculator app using Python\"}],\n    tools=[\n        {\"type\": \"text_editor_20250728\", \"name\": \"str_replace_based_edit_tool\", \"max_characters\": 10000},\n        {\"type\": \"web_search_20250305\", \"name\": \"web_search\", \"max_uses\": 3},\n    ],\n    betas=[\"context-management-2025-06-27\"],\n    context_management={\n        \"edits\": [{\n            \"type\": \"clear_tool_uses_20250919\",\n            \"trigger\": {\"type\": \"input_tokens\", \"value\": 30000},\n            \"keep\": {\"type\": \"tool_uses\", \"value\": 3},\n            \"clear_at_least\": {\"type\": \"input_tokens\", \"value\": 5000},\n            \"exclude_tools\": [\"web_search\"],\n        }]\n    },\n)"
+      },
+      "examTips": [
+        "Server-side edits: the client does not have to modify its own history.",
+        "`exclude_tools` is the way to protect specific results (like web search) from being cleared.",
+        "Clearing is rule-based and does not summarize; the cleared content is gone from the model's view, so important facts should be saved to memory first."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/context-editing"
+    },
+    {
+      "heading": "The memory tool",
+      "notes": [
+        "Lets Claude store and retrieve information **across conversations** in a directory of files, enabling just-in-time retrieval and cross-session knowledge without keeping everything in the window.",
+        "It is **client-side**: Claude emits `tool_use` calls and your application executes them against storage you control (disk, database, encrypted files) and returns `tool_result`. Memory lives entirely in your app, which controls data retention.",
+        "Enable with `{\"type\": \"memory_20250818\", \"name\": \"memory\"}`; the name must be `memory` and no schema is defined. No beta header is required.",
+        "Commands: `view` (directory listing or file with line numbers, optional `view_range`), `create`, `str_replace`, `insert` (after `insert_line`), `delete`, `rename`. Paths live under `/memories`.",
+        "When the tool is present, the API automatically adds a system-prompt protocol: always view the memory directory first, record progress as you go, assume interruption.",
+        "**Security**: you must validate every path to prevent traversal (reject paths outside `/memories`, resolve to canonical form, watch `../` and URL-encoded `%2e%2e%2f`). Also cap file sizes, consider expiring old memory, and strip sensitive data.",
+        "**Multisession pattern**: an initializer session sets up a progress log, feature checklist and init script; later sessions read them first and update the log before ending. Work one feature at a time and mark done only after end-to-end verification.",
+        "Combine with context editing (save before clearing) or compaction (memory preserves what must survive summarization)."
+      ],
+      "example": {
+        "title": "Memory tool call round trip",
+        "language": "json",
+        "code": "// Request tool config\n{\"type\": \"memory_20250818\", \"name\": \"memory\"}\n\n// Claude asks to look at memory\n{\"type\": \"tool_use\", \"id\": \"toolu_01C4...\", \"name\": \"memory\",\n \"input\": {\"command\": \"view\", \"path\": \"/memories\"}}\n\n// Your app replies\n{\"type\": \"tool_result\", \"tool_use_id\": \"toolu_01C4...\",\n \"content\": \"Here're the files and directories up to 2 levels deep in /memories...\"}"
+      },
+      "examTips": [
+        "Memory tool is client-side: Anthropic does not store the files; you implement the handler and own the storage and security.",
+        "Path traversal validation is the key security duty named in the docs.",
+        "Memory = persistence across sessions; context editing/compaction = managing the live window. They complement each other."
+      ],
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/memory-tool"
+    },
+    {
+      "heading": "Long-context prompting tips",
+      "notes": [
+        "**Put long-form data at the top**: place long documents and inputs near the top of the prompt, above the query, instructions and examples. This improves performance across all models.",
+        "**Structure multi-document input with XML tags**, for example wrapping each file in `<document>` with `<source>` and `<document_content>` metadata.",
+        "**Ground responses in quotes**: for long-document tasks, ask Claude to first extract relevant quotes (for example into `<quotes>` tags) and then act on them. This helps cut through the noise of the rest of the document.",
+        "Queries placed at the end can noticeably improve response quality on complex multi-document inputs (documented guidance for the long-context section)."
+      ],
+      "example": {
+        "title": "Multi-document prompt layout",
+        "language": "text",
+        "code": "<documents>\n  <document index=\"1\">\n    <source>annual_report_2023.pdf</source>\n    <document_content>{{ANNUAL_REPORT}}</document_content>\n  </document>\n  <document index=\"2\">\n    <source>competitor_analysis_q2.xlsx</source>\n    <document_content>{{COMPETITOR_ANALYSIS}}</document_content>\n  </document>\n</documents>\n\nFind quotes relevant to the question and place them in <quotes> tags. Then, based on the quotes, answer in <answer> tags.\n\nQuestion: ..."
+      },
+      "examTips": [
+        "Documents first, question last; quote extraction before the task.",
+        "XML tags separate documents and metadata cleanly; they are the recommended structure."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices"
+    },
+    {
+      "heading": "Multi-window workflows and state management",
+      "notes": [
+        "Current models are good at long-horizon state tracking across multiple context windows: work on a complex task, save state, continue in a fresh window.",
+        "Prompt the model about its budget (for example that context will be compacted or refreshed, so it should save progress to memory before the window resets) and not to wrap up early because of context concerns.",
+        "**Start fresh vs compact**: when a window is cleared, consider a brand new window rather than compaction, because the latest models are very good at rediscovering state from the filesystem. Be prescriptive: for example review progress.txt, tests.json and the git log.",
+        "**State management best practices**: use structured formats (JSON) for structured state such as test results; use free-form text for progress notes; use **git** for a log of changes and restorable checkpoints.",
+        "First context window: set up the framework (write tests, create setup scripts); later windows iterate on a todo list."
+      ],
+      "examTips": [
+        "Filesystem and git state can beat a lossy summary when starting a fresh window.",
+        "Structured data (JSON) for state with a schema; plain text for narrative progress."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices"
+    },
+    {
+      "heading": "Context management in Claude Code",
+      "notes": [
+        "**Loads before you type**: CLAUDE.md, auto memory, MCP tool names (tool definitions are deferred by default via tool search) and skill descriptions. Skill bodies load only when invoked, so moving workflow-specific instructions from CLAUDE.md into skills keeps base context small. Keep CLAUDE.md under about 200 lines.",
+        "**Commands**: `/context` shows a live breakdown by category with suggestions; `/usage` shows token usage and plan breakdown; `/clear` starts fresh between unrelated tasks; `/compact [instructions]` summarizes with a focus (for example `/compact focus on the auth bug fix`); `/rewind` can summarize from or up to a chosen message; `/autocompact` sets how full the window gets before automatic compaction; `/memory` edits memory files.",
+        "**Auto-compaction** runs as you near the limit. Compact instructions can also live in CLAUDE.md under a 'Compact instructions' heading.",
+        "**After compaction**: project-root CLAUDE.md, unscoped rules and auto memory are re-injected from disk; up to five most recently modified read or edited files are re-read (files over 5,000 tokens return as path references); invoked skill bodies are re-injected capped at 5,000 tokens per skill and 25,000 total; path-scoped rules and nested CLAUDE.md reload on demand; SessionStart hooks with the `compact` source run again.",
+        "If a rule must survive compaction, remove its `paths:` frontmatter or put it in the project-root CLAUDE.md.",
+        "**Subagents** run in their own context window; verbose work (tests, docs, logs) stays there and only a summary returns. Hooks can pre-filter output (for example grep for errors) so Claude never sees the full log.",
+        "Agent teams run one context window per teammate, so token use scales with team size."
+      ],
+      "example": {
+        "title": "Compaction guidance in CLAUDE.md",
+        "language": "text",
+        "code": "# Compact instructions\n\nWhen you are using compact, please focus on test output and code changes"
+      },
+      "examTips": [
+        "Claude Code applies the same patterns from the engineering article: CLAUDE.md up front (hybrid), glob/grep just-in-time, compaction, subagents.",
+        "`/clear` between unrelated tasks; `/compact` with focus when continuing the same task.",
+        "Skills are the on-demand alternative to a bloated CLAUDE.md."
+      ],
+      "source": "https://code.claude.com/docs/en/context-window"
+    }
+  ],
+  "keyTakeaways": [
+    "Context engineering curates all tokens at inference (prompt, tools, data, history); the goal is the smallest set of high-signal tokens.",
+    "Context rot: accuracy and recall degrade as tokens grow; it is a gradient, not a cliff, and persists in 1M windows.",
+    "Right altitude: between brittle if-else logic and vague guidance; start minimal and add based on failures.",
+    "Tools should be self-contained, non-overlapping and token-efficient; ambiguous tool sets cause failures.",
+    "Just-in-time retrieval keeps lightweight references and loads data via tools at runtime; hybrid (CLAUDE.md plus glob/grep) is common.",
+    "Compaction summarizes near-full context (tune recall first, then precision); note-taking persists state outside the window; sub-agents return ~1-2k token summaries.",
+    "Server-side compaction: `compact_20260112` in `context_management.edits`, beta `compact-2026-01-12`, default trigger 150k (min 50k); custom instructions replace the default prompt.",
+    "Context editing: beta `context-management-2025-06-27`; `clear_tool_uses_20250919` and `clear_thinking_20251015`; applied server-side; use `clear_at_least` and `exclude_tools`.",
+    "Memory tool is client-side (`memory_20250818`, `/memories`, six commands); you own storage and must prevent path traversal.",
+    "Long-context prompts: documents at the top, query last, XML-tag documents, ask for quotes first.",
+    "Overflow: input alone too large gives 400; input plus max_tokens over the window on 4.5+ models stops with `model_context_window_exceeded`. Cached tokens still count.",
+    "Claude Code: `/context`, `/clear`, `/compact [focus]`, subagents for verbose work, skills over long CLAUDE.md; root CLAUDE.md and auto memory are re-injected after compaction."
+  ],
+  "glossary": [
+    {"term": "Context engineering", "definition": "Curating and maintaining the full set of tokens (instructions, tools, data, history) given to the model at each inference step."},
+    {"term": "Context rot", "definition": "Degradation of accuracy and recall as the number of tokens in the context window grows."},
+    {"term": "Attention budget", "definition": "Mental model that each additional token consumes some of the model's limited capacity to attend across context."},
+    {"term": "Altitude", "definition": "The level of specificity of system prompt instructions, between brittle hardcoded logic and vague guidance."},
+    {"term": "Just-in-time retrieval", "definition": "Keeping lightweight references in context and loading the actual data with tools only when needed."},
+    {"term": "Progressive disclosure", "definition": "Agent discovers relevant context incrementally through exploration, each step informing the next."},
+    {"term": "Compaction", "definition": "Summarizing the conversation as it nears the window limit and continuing with the summary in a fresh window."},
+    {"term": "Structured note-taking", "definition": "Agent writes persistent notes outside the window (for example NOTES.md or memory files) and reads them back later."},
+    {"term": "Sub-agent", "definition": "A specialized agent working in its own clean context window that returns a condensed summary to a lead agent."},
+    {"term": "Context editing", "definition": "Server-side rule-based clearing of old tool results or thinking blocks from the conversation history."},
+    {"term": "clear_tool_uses_20250919", "definition": "Context editing strategy that clears the oldest tool results past a trigger, leaving placeholders."},
+    {"term": "compaction block", "definition": "Response content block holding the server-written summary; the API ignores blocks before the last one."},
+    {"term": "Memory tool (memory_20250818)", "definition": "Client-side Anthropic-defined tool for file-based persistent memory under /memories."},
+    {"term": "Context awareness", "definition": "Certain models track remaining token budget via API-injected tags such as token_budget and system_warning."},
+    {"term": "model_context_window_exceeded", "definition": "Stop reason when generation hits the context window limit (input plus max_tokens over the window on 4.5+ models)."}
+  ],
+  "quiz": [
+    {
+      "q": "A long-running research agent's answers become less precise after many tool calls, although the 1M-token window is only 60% full. What is the best explanation and response?",
+      "options": [
+        "The window is nearly full, so it must be upgraded to a larger model",
+        "Context rot: quality degrades gradually as tokens accumulate, so curate context (clear old tool results, compact, or offload to sub-agents)",
+        "The API silently truncates input at 50% of the window",
+        "Extended thinking is disabled, which causes lost recall"
+      ],
+      "answer": 1,
+      "explanation": "Context rot is a gradient: accuracy and recall degrade as tokens grow even before the limit. Curation (clearing, compaction, sub-agents) is the fix. A bigger window does not remove rot, no silent 50% truncation exists, and thinking is unrelated.",
+      "source": "https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents"
+    },
+    {
+      "q": "Your team's system prompt contains dozens of nested if-else rules for every support scenario and still fails on new cases. Which change best matches Anthropic's guidance?",
+      "options": [
+        "Add more if-else rules for each new failure",
+        "Replace the prompt with a single sentence: 'Be helpful.'",
+        "Move to the right altitude: clear principles and heuristics in organized sections, with a few canonical examples",
+        "Remove all examples and tools"
+      ],
+      "answer": 2,
+      "explanation": "Brittle hardcoded logic is too low an altitude; one vague sentence is too high. The right altitude gives heuristics with structure and a small set of diverse examples.",
+      "source": "https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents"
+    },
+    {
+      "q": "A coding agent must work in a 2-million-line repository. Which design best reflects just-in-time retrieval?",
+      "options": [
+        "Embed and load the entire repo into the prompt on every turn",
+        "Pre-compute embeddings and inject top results before every model call, with no agent exploration",
+        "Give the agent glob, grep and file-read tools, and let it keep file paths and load content only when needed",
+        "Ask the user to paste relevant files manually"
+      ],
+      "answer": 2,
+      "explanation": "Just-in-time retrieval keeps lightweight references (paths, queries) and loads data at runtime via tools, as Claude Code does with grep, glob, head and tail. Loading everything wastes the attention budget.",
+      "source": "https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents"
+    },
+    {
+      "q": "A multi-day migration agent must resume after context resets, with clear milestones. Which technique is the best primary fit?",
+      "options": [
+        "Structured note-taking to persistent files (for example a progress file or the memory tool)",
+        "Lowering the temperature",
+        "Increasing max_tokens",
+        "Adding more few-shot examples to the system prompt"
+      ],
+      "answer": 0,
+      "explanation": "Iterative work with clear milestones suits note-taking: state persisted outside the window and reloaded on resume. The other options do not preserve state across resets.",
+      "source": "https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents"
+    },
+    {
+      "q": "A lead agent coordinates broad research across many independent sources, and its context fills with raw search results. What architecture best addresses this?",
+      "options": [
+        "A single agent that keeps all results and relies on a larger window",
+        "Sub-agents that explore in clean windows and return condensed summaries (roughly 1,000 to 2,000 tokens) to the lead",
+        "Clearing the system prompt each turn",
+        "Disabling tool use after the first call"
+      ],
+      "answer": 1,
+      "explanation": "Sub-agents isolate detailed search context and return distilled findings, keeping the lead's context focused. A larger window alone does not prevent rot.",
+      "source": "https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents"
+    },
+    {
+      "q": "You enable server-side compaction at a token threshold and pass `instructions` with a short custom summary prompt. What happens?",
+      "options": [
+        "The instructions are appended to the default summarization prompt",
+        "The instructions replace the default summarization prompt entirely",
+        "The instructions are ignored unless pause_after_compaction is true",
+        "The API rejects the request because instructions are not supported"
+      ],
+      "answer": 1,
+      "explanation": "Custom `instructions` replace the default summarization prompt, so your prompt must cover everything the summary needs to keep.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/compaction-threshold"
+    },
+    {
+      "q": "After a compaction block appears in a response, how should your application continue the conversation?",
+      "options": [
+        "Delete the compaction block and keep only text blocks",
+        "Append the full assistant content (including the compaction block); the API ignores blocks before the last compaction block",
+        "Convert the summary to a system prompt and drop all messages",
+        "Resend only the compaction block's summary as a user message"
+      ],
+      "answer": 1,
+      "explanation": "Append the response content as-is; the API ignores everything before the latest compaction block, so you may keep the full list. Stripping the block loses the summary.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/compaction-threshold"
+    },
+    {
+      "q": "An agent runs many web searches and file reads. You want to drop old tool results automatically but never clear web_search results, and avoid cache churn from tiny clears. Which configuration fits?",
+      "options": [
+        "clear_thinking_20251015 with keep: all",
+        "clear_tool_uses_20250919 with exclude_tools: [\"web_search\"] and a clear_at_least value",
+        "compact_20260112 with trigger below 50,000",
+        "Memory tool with the delete command"
+      ],
+      "answer": 1,
+      "explanation": "Tool result clearing supports `exclude_tools` to protect results and `clear_at_least` so a clear is only applied if it frees enough tokens to justify cache invalidation. Compaction triggers must be at least 50,000, and thinking clearing targets thinking blocks.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/context-editing"
+    },
+    {
+      "q": "You use both thinking block clearing and tool result clearing in one request. What is the requirement on the edits array?",
+      "options": [
+        "List clear_tool_uses_20250919 first",
+        "List clear_thinking_20251015 first",
+        "Order does not matter",
+        "The two strategies cannot be combined"
+      ],
+      "answer": 1,
+      "explanation": "The docs say that when combining strategies, clear_thinking_20251015 must be listed first in the edits array.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/context-editing"
+    },
+    {
+      "q": "Which statement about the memory tool is correct?",
+      "options": [
+        "Anthropic hosts the memory files and you query them through a server endpoint",
+        "It is client-side: Claude requests file operations under /memories and your application executes them against storage you control",
+        "It requires the context-management-2025-06-27 beta header",
+        "It can only store data within the current conversation"
+      ],
+      "answer": 1,
+      "explanation": "The memory tool is client-side; your handler performs view/create/str_replace/insert/delete/rename and returns tool results. It persists across conversations and needs no beta header.",
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/memory-tool"
+    },
+    {
+      "q": "While implementing the memory tool handler, Claude requests the path `/memories/../../secrets.env`. What should your handler do?",
+      "options": [
+        "Serve the file since it begins with /memories",
+        "Reject it: validate and canonicalize every path so it stays inside the memory directory, and return an error result",
+        "Let Claude decide whether it is safe",
+        "Rename the file into /memories first"
+      ],
+      "answer": 1,
+      "explanation": "Path traversal protection is the application's responsibility; resolve to a canonical path, ensure it remains under /memories, and watch for encoded sequences.",
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/memory-tool"
+    },
+    {
+      "q": "You build a prompt asking Claude to answer a question over six long reports. Which layout follows Anthropic's long-context guidance?",
+      "options": [
+        "Question first, then the six reports pasted together without tags",
+        "Reports at the top wrapped in XML document tags with source metadata, then instructions asking Claude to extract relevant quotes before answering, then the question",
+        "Reports split across multiple system prompts",
+        "Only the question, with reports summarized by hand"
+      ],
+      "answer": 1,
+      "explanation": "Long-form data goes at the top above the query, structured with XML tags, and quote extraction first helps Claude focus on relevant content.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices"
+    },
+    {
+      "q": "A request on a Claude 4.5-or-newer model has input of 150k tokens and max_tokens large enough that input plus max_tokens exceeds the context window, though input alone fits. What happens?",
+      "options": [
+        "The API returns a 400 validation error before generating anything",
+        "The API accepts the request, and if generation reaches the window it stops with stop_reason model_context_window_exceeded",
+        "The API automatically compacts the conversation",
+        "The API truncates the oldest messages silently"
+      ],
+      "answer": 1,
+      "explanation": "On 4.5 and newer models, input plus max_tokens over the window is accepted and generation can stop with `model_context_window_exceeded`. A 400 occurs only when input alone exceeds the window. No automatic compaction or truncation occurs unless you enable compaction.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/context-windows"
+    },
+    {
+      "q": "In Claude Code you have finished a feature and are about to start an unrelated task, but your session is full of stale file reads. Which action is best?",
+      "options": [
+        "Run /clear to start fresh (using /rename first if you want to resume later)",
+        "Keep going and rely on prompt caching to hide the cost",
+        "Add the old files to CLAUDE.md",
+        "Run /compact with no instructions and continue unrelated work in the same session"
+      ],
+      "answer": 0,
+      "explanation": "Docs recommend /clear between unrelated tasks since old context crowds out useful files and costs tokens every message. /compact is for continuing related work, ideally with a focus.",
+      "source": "https://code.claude.com/docs/en/costs"
+    },
+    {
+      "q": "After Claude Code auto-compacts a long session, which of the following is NOT automatically preserved the way the others are?",
+      "options": [
+        "Project-root CLAUDE.md (re-injected from disk)",
+        "Auto memory (re-injected from disk)",
+        "A path-scoped rule (paths: frontmatter) that had loaded earlier, which is summarized away and reloads only when a matching file is touched again",
+        "The system prompt"
+      ],
+      "answer": 2,
+      "explanation": "Path-scoped rules and nested CLAUDE.md files load into message history on demand, so compaction summarizes them away. To make a rule persist, drop paths: frontmatter or put it in the root CLAUDE.md.",
+      "source": "https://code.claude.com/docs/en/context-window"
+    }
+  ]
+}

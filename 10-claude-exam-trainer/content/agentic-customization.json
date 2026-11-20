@@ -1,0 +1,439 @@
+{
+  "slug": "agentic-customization",
+  "title": "Agentic Customization",
+  "overview": "Claude Code and the Agent SDK can be customized without changing any model code: you add persistent context (CLAUDE.md), reusable knowledge and workflows (Agent Skills and commands), isolated workers (subagents), deterministic automation (hooks), external connections (MCP), response style (output styles), and package it all as plugins. The exam tests whether you can pick the right mechanism for a scenario, know where each file lives, and know how each one loads into context.",
+  "sources": [
+    {"title": "Extend Claude Code", "url": "https://code.claude.com/docs/en/features-overview"},
+    {"title": "Agent Skills overview (platform docs)", "url": "https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview"},
+    {"title": "Using Agent Skills with the API", "url": "https://platform.claude.com/docs/en/build-with-claude/skills-guide"},
+    {"title": "Extend Claude with skills (Claude Code)", "url": "https://code.claude.com/docs/en/skills"},
+    {"title": "Create custom subagents", "url": "https://code.claude.com/docs/en/sub-agents"},
+    {"title": "Plugins overview", "url": "https://code.claude.com/docs/en/plugins"},
+    {"title": "Create a marketplace", "url": "https://code.claude.com/docs/en/plugins/create-marketplace"},
+    {"title": "Output styles", "url": "https://code.claude.com/docs/en/output-styles"},
+    {"title": "How Claude remembers your project (CLAUDE.md)", "url": "https://code.claude.com/docs/en/memory"},
+    {"title": "Connect Claude Code to tools via MCP", "url": "https://code.claude.com/docs/en/mcp"},
+    {"title": "Automate actions with hooks", "url": "https://code.claude.com/docs/en/hooks-guide"},
+    {"title": "Hooks reference", "url": "https://code.claude.com/docs/en/hooks"},
+    {"title": "Agent SDK overview", "url": "https://code.claude.com/docs/en/agent-sdk/overview"},
+    {"title": "Use Claude Code features in the SDK", "url": "https://code.claude.com/docs/en/agent-sdk/claude-code-features"}
+  ],
+  "sections": [
+    {
+      "heading": "The customization landscape",
+      "notes": [
+        "Claude Code has an extension layer on top of its built-in tools. Each mechanism plugs into a different part of the agentic loop: **CLAUDE.md** (always-on context), **output styles** (role/tone/format), **skills** (on-demand knowledge and workflows), **MCP** (external tools and data), **subagents** (isolated context), **hooks** (event-driven automation), **plugins/marketplaces** (packaging and distribution).",
+        "Context cost differs by feature: CLAUDE.md and the active output style load into every request; skill descriptions load every request but full bodies only when used; MCP tool names load at start with schemas deferred (tool search); subagents get their own isolated context; hooks cost zero context unless they return output.",
+        "Layering rules: CLAUDE.md files are **additive** (all levels contribute). Skills and subagents **override by name** by priority. MCP servers override by name (local > project > user). Hooks **merge** - every registered hook fires.",
+        "Docs recommend building up over time: add a CLAUDE.md line when Claude gets something wrong twice; make a skill when you paste the same playbook a third time; add a hook when something must happen every time; package as a plugin when a second repo needs the same setup."
+      ],
+      "example": {
+        "title": "Typical combined setup (project layout)",
+        "language": "text",
+        "code": "my-repo/\n  CLAUDE.md                      # always-on conventions (< 200 lines)\n  .mcp.json                      # shared MCP servers (database, issue tracker)\n  .claude/\n    settings.json                # hooks + permissions\n    skills/deploy/SKILL.md       # on-demand workflow, invoked as /deploy\n    agents/code-reviewer.md      # isolated reviewer subagent\n    rules/testing.md             # optional path-scoped rules\n    output-styles/terse.md       # custom response style"
+      },
+      "examTips": [
+        "Whenever a question says 'must happen every time / guarantee / block', the answer is a hook (or permissions), never CLAUDE.md, a skill, or an output style - those are instructions Claude follows, not enforcement.",
+        "'Reusable knowledge loaded only when relevant' = skill. 'Always know this project fact' = CLAUDE.md."
+      ],
+      "source": "https://code.claude.com/docs/en/features-overview"
+    },
+    {
+      "heading": "Agent Skills: SKILL.md, frontmatter and progressive disclosure",
+      "notes": [
+        "A skill is a **directory containing a `SKILL.md`**: YAML frontmatter between `---` markers plus a Markdown body of instructions. It can bundle extra reference files and scripts.",
+        "On the API/platform, `name` and `description` are required. `name`: max 64 chars, lowercase letters/numbers/hyphens only, no XML tags, cannot contain reserved words `anthropic` or `claude`. `description`: non-empty, max 1,024 chars, no XML tags, and must say both **what the skill does and when to use it**.",
+        "In Claude Code all frontmatter fields are optional (description recommended). Extra fields include `when_to_use`, `argument-hint`, `arguments`, `disable-model-invocation`, `user-invocable`, `allowed-tools`, `disallowed-tools`, `model`, `effort`, `context` (`fork`), `agent`, `hooks`, `paths`, `shell`. Unknown fields are ignored silently.",
+        "**Progressive disclosure has three levels:** Level 1 metadata (name + description, always loaded, about 100 tokens per skill); Level 2 the SKILL.md body (loaded when the skill triggers, under about 5k tokens recommended); Level 3 bundled files and scripts (loaded only when referenced; scripts run via bash and only their *output* enters context).",
+        "Keep SKILL.md under about 500 lines and push detail into separate files such as `reference.md` or `scripts/`. Because unused bundled files cost zero tokens, a skill can hold large reference material.",
+        "Claude matches the user's request against the **description** to decide whether to load a skill, so vague or overlapping descriptions cause missed or wrong triggers.",
+        "Use `disable-model-invocation: true` for side-effecting workflows (deploy, commit) so only the user can run them; use `user-invocable: false` for background knowledge Claude should use but that should not appear in the `/` menu.",
+        "Security: treat skills like installed software. Use only trusted skills; audit SKILL.md, scripts and any external URLs a skill fetches."
+      ],
+      "example": {
+        "title": "A skill with a script and a reference file",
+        "language": "text",
+        "code": "pdf-processing/\n  SKILL.md        # overview + navigation (Level 2)\n  FORMS.md        # loaded only if form filling is needed (Level 3)\n  scripts/\n    fill_form.py  # executed via bash; code never enters context\n\n--- SKILL.md ---\n---\nname: pdf-processing\ndescription: Extract text and tables from PDF files, fill forms, merge documents. Use when working with PDF files or when the user mentions PDFs, forms, or document extraction.\n---\n\n# PDF Processing\nUse pdfplumber to extract text. For form filling, see FORMS.md."
+      },
+      "examTips": [
+        "Which level loads at startup? Only metadata (name + description). The body loads on trigger; bundled files load on demand.",
+        "A script in a skill is cheap in tokens: only its output is loaded, not its source - and it is deterministic, unlike having Claude regenerate code.",
+        "Name rule trap: a skill named `claude-helper` or `anthropic-tools` is invalid on the platform because of reserved words."
+      ],
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview"
+    },
+    {
+      "heading": "Skills across surfaces: API, Claude.ai, Claude Code, Agent SDK",
+      "notes": [
+        "**Claude API (Messages API):** list skills in `container.skills` and include the **code execution tool** (`code_execution_20250825`), because skills run in its container. Each entry has `type` (`anthropic` for pre-built, `custom` for uploaded), `skill_id`, and optional `version` (a date or `latest` for Anthropic skills; `skver_...` or `latest` for custom). Up to **20 skills per request**.",
+        "Pre-built Anthropic skills: `pptx`, `xlsx`, `docx`, `pdf`. Custom skills are uploaded with `POST /v1/skills` (SKILL.md with name/description required; total under 30 MB) and versioned with `POST /v1/skills/{skill_id}/versions` (each version is a full snapshot). Managed Agents instead attach skills in the agent's `skills` array.",
+        "API skills run in a sandbox with **no network access and no runtime package installation**. Custom API skills are **workspace-wide**: every workspace member can use them.",
+        "**Claude.ai:** pre-built skills are active for document creation; custom skills are uploaded as zip files on paid plans with code execution enabled. Network access varies by user/admin settings.",
+        "**Claude Code:** filesystem-based, no upload. Personal `~/.claude/skills/<name>/SKILL.md`, project `.claude/skills/<name>/SKILL.md`, nested subdirectory skills, plugin skills (namespaced `/plugin:skill`), and enterprise managed skills. Full network access like any local program. On name collisions enterprise beats personal beats project.",
+        "**Custom skills do NOT sync across surfaces.** A skill uploaded to claude.ai is not on the API, an API skill is not on claude.ai, and Claude Code skills are separate from both.",
+        "**Agent SDK:** skills are discovered from the filesystem via `settingSources` (`user`/`project`); the `skills` option can be `\"all\"`, a list of names, or `[]`; the Skill tool is added automatically. There is **no programmatic API to register skills** - they must exist as `.claude/skills/<name>/SKILL.md`."
+      ],
+      "example": {
+        "title": "Using a pre-built skill through the Messages API",
+        "language": "bash",
+        "code": "curl https://api.anthropic.com/v1/messages \\\n  -H \"x-api-key: $ANTHROPIC_API_KEY\" \\\n  -H \"anthropic-version: 2026-10-21\" \\\n  -H \"content-type: application/json\" \\\n  -d '{\n    \"model\": \"claude-opus-5-5\",\n    \"max_tokens\": 4096,\n    \"container\": {\n      \"skills\": [\n        {\"type\": \"anthropic\", \"skill_id\": \"pptx\", \"version\": \"latest\"}\n      ]\n    },\n    \"messages\": [{\"role\": \"user\", \"content\": \"Create a presentation about renewable energy\"}],\n    \"tools\": [{\"type\": \"code_execution_20250825\", \"name\": \"code_execution\"}]\n  }'"
+      },
+      "examTips": [
+        "If a scenario uses skills via the API but omits the code execution tool, it will not work: the tool supplies the container.",
+        "'Share a skill with the whole team in Claude Code' = commit `.claude/skills/` to the repo or ship it in a plugin; 'share on the API' = upload to the workspace.",
+        "Do not assume a skill uploaded in claude.ai is available through the API."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/skills-guide"
+    },
+    {
+      "heading": "Custom slash commands, $ARGUMENTS and allowed-tools",
+      "notes": [
+        "Custom commands have been **merged into skills** in Claude Code. A file `.claude/commands/deploy.md` and a skill `.claude/skills/deploy/SKILL.md` both create `/deploy`. Old command files keep working; if a skill and command share a name, the **skill wins**. Docs recommend skills for new work (they add a supporting-files directory, invocation control, and auto-loading).",
+        "`$ARGUMENTS` holds the full argument string typed after the command. `$ARGUMENTS[N]` or `$N` gives a positional argument (0-based; quote multi-word values); `$name` works for arguments declared in the `arguments` frontmatter. If you pass arguments and the content has no placeholder, Claude Code appends `ARGUMENTS: <input>`.",
+        "Other substitutions include `${CLAUDE_SKILL_DIR}`, `${CLAUDE_PROJECT_DIR}`, `${CLAUDE_SESSION_ID}`. Dynamic context injection: a line like ``!`git diff HEAD` `` runs the command first and inlines the output before Claude sees the prompt.",
+        "`allowed-tools` **pre-approves** tools (no permission prompt) for the turn that invokes the skill/command, e.g. `Bash(git add *) Bash(git commit *)`. It does **not restrict** other tools - unlisted tools remain available under normal permission settings. The grant clears at your next message. `disallowed-tools` removes tools while the skill is active.",
+        "`context: fork` runs the skill in an isolated subagent (optionally `agent: Explore|Plan|general-purpose|<custom>`); the subagent does not see conversation history, so the instructions must be self-contained."
+      ],
+      "example": {
+        "title": "A user-only /fix-issue command",
+        "language": "text",
+        "code": "# .claude/skills/fix-issue/SKILL.md  (or .claude/commands/fix-issue.md)\n---\nname: fix-issue\ndescription: Fix a GitHub issue\ndisable-model-invocation: true\nallowed-tools: Bash(git add *) Bash(git commit *) Bash(git status *)\n---\n\nFix GitHub issue $ARGUMENTS following our coding standards.\n\n1. Read the issue description\n2. Understand the requirements\n3. Implement the fix\n4. Write tests\n5. Create a commit\n\n# Usage: /fix-issue 123   -> $ARGUMENTS = 123"
+      },
+      "examTips": [
+        "`allowed-tools` is a permission pre-approval, not a sandbox or allowlist-only restriction - a classic distractor.",
+        "Command vs skill: same `/name` behavior, but only skills can have bundled files and automatic model invocation (controlled by `disable-model-invocation`)."
+      ],
+      "source": "https://code.claude.com/docs/en/skills"
+    },
+    {
+      "heading": "Subagents (.claude/agents)",
+      "notes": [
+        "A subagent is a **Markdown file with YAML frontmatter**; the body becomes its system prompt. It runs in its **own context window** with its own tools and permissions, and only a summary returns to the main conversation. Subagents get just their system prompt plus environment details, not the full Claude Code system prompt.",
+        "Required frontmatter: `name` (no `:`) and `description` (tells Claude when to delegate). Optional: `tools` (allowlist; inherits all if omitted), `disallowedTools`, `model` (`sonnet`, `opus`, `haiku`, full ID, or `inherit`), `permissionMode`, `maxTurns`, `skills` (preloaded in full at startup), `mcpServers`, `hooks`, `memory`, `effort`, `isolation: worktree`, `background`, `omitClaudeMd`, `color`.",
+        "**Priority when names collide:** managed settings > `--agents` CLI flag (session only) > `.claude/agents/` (project) > `~/.claude/agents/` (user) > plugin `agents/`. Plugin subagents get scoped names like `my-plugin:reviewer` and ignore `hooks`, `mcpServers`, `permissionMode`.",
+        "Built-in subagents: **Explore** (read-only, fast search), **Plan** (read-only research in plan mode), **general-purpose** (all tools), plus statusline-setup and claude-code-guide.",
+        "Isolation: a fresh context does not see your conversation history. It does receive CLAUDE.md and a git status snapshot (except Explore/Plan, and `omitClaudeMd` agents). Verbose work such as test runs stays out of the main context. Many subagents returning big results can still bloat the main context.",
+        "Nesting: subagents **can** spawn subagents (default up to three layers below main); omit `Agent` from `tools` (or deny it) to prevent a given subagent from spawning others.",
+        "In the Agent SDK define subagents programmatically with the `agents` parameter and include `Agent` in `allowedTools`."
+      ],
+      "example": {
+        "title": "A read-only reviewer subagent",
+        "language": "text",
+        "code": "# .claude/agents/code-reviewer.md\n---\nname: code-reviewer\ndescription: Reviews code for quality and best practices. Use after writing or modifying code.\ntools: Read, Glob, Grep\nmodel: sonnet\n---\n\nYou are a code reviewer. When invoked, analyze the code and provide\nspecific, actionable feedback on quality, security, and best practices."
+      },
+      "examTips": [
+        "Choose a subagent when the task would flood the main context (reads dozens of files) or needs a restricted toolset/model. Choose a skill when you just need reusable instructions in the current context.",
+        "Omitting `tools` means the subagent inherits everything - to make a safe read-only agent you must list `tools` explicitly (or use `disallowedTools`).",
+        "Do not assume subagents are forbidden from nesting; it is depth-limited and configurable."
+      ],
+      "source": "https://code.claude.com/docs/en/sub-agents"
+    },
+    {
+      "heading": "Plugins and marketplaces",
+      "notes": [
+        "A **plugin** is a directory of components installed and loaded as one unit: skills, agents, hooks, MCP servers (and mods). Its manifest is `.claude-plugin/plugin.json` (name, optionally version/description). Components sit at the plugin root: `skills/<name>/SKILL.md`, `agents/*.md`, `hooks/hooks.json`, `.mcp.json`.",
+        "Plugin skills are **namespaced** by plugin name (for example `/my-plugin:review`) so multiple plugins coexist without collisions.",
+        "Use a plugin when you want several customizations packaged together, reused across repositories, versioned, or distributed. Skills, subagents, hooks and MCP all work standalone without a plugin.",
+        "A **marketplace** is a catalog: a repo/directory containing `.claude-plugin/marketplace.json` that lists plugins and where to fetch each. Required top-level fields: `name`, `owner`, `plugins` array; each entry needs `name` and `source` (relative path like `./plugins/x`, or `github`, `git-subdir`, `url`, `archive`, `npm`, `command` sources).",
+        "Workflow: `claude plugin validate ./my-marketplace`, then `/plugin marketplace add <path|owner/repo>`, then `/plugin install name@marketplace`. For development, load a plugin straight from a folder with `--plugin-dir`, and `/reload-plugins` to pick up edits.",
+        "Install scopes: **user** (all your projects), **project** (committed `.claude/settings.json`, everyone in repo, each still installs locally), **local** (you, this repo only).",
+        "Security: an enabled plugin runs with your privileges and its skill/agent descriptions are in context every turn. Anthropic's official marketplace is added by default; the names `claude-plugins-official` etc. are reserved. Organizations can allowlist/block marketplaces through managed settings."
+      ],
+      "example": {
+        "title": "Minimal marketplace.json",
+        "language": "json",
+        "code": "{\n  \"name\": \"my-marketplace\",\n  \"description\": \"Plugins for my team\",\n  \"owner\": { \"name\": \"Your Name\" },\n  \"plugins\": [\n    {\n      \"name\": \"my-first-plugin\",\n      \"source\": \"./plugins/my-first-plugin\",\n      \"description\": \"A greeting plugin to learn the basics\"\n    }\n  ]\n}\n\n# claude plugin marketplace add ./my-marketplace\n# claude plugin install my-first-plugin@my-marketplace\n# then run: /my-first-plugin:hello"
+      },
+      "examTips": [
+        "A marketplace is only a catalog (marketplace.json); the plugin is the installable unit with plugin.json.",
+        "Keep the marketplace entry `name` identical to the plugin's manifest `name`, or install by manifest name fails.",
+        "Relative `source` paths are written from the marketplace root and cannot contain `..`.",
+        "Install id format is `plugin-name@marketplace-name`."
+      ],
+      "source": "https://code.claude.com/docs/en/plugins/create-marketplace"
+    },
+    {
+      "heading": "Output styles",
+      "notes": [
+        "An output style is a set of instructions that sets Claude's **role, tone and response format** for every response in a session. Built-ins besides Default: **Proactive, Concise, Explanatory, Learning**.",
+        "Explanatory adds `Insight` blocks explaining choices; Learning adds those and leaves `TODO(human)` pieces for you to write; Concise leads with results and trims narration; Proactive starts work with reasonable assumptions instead of asking about routine decisions (it does not change the permission mode).",
+        "Switch with `/output-style <name>` or `/config`; the choice is saved to `.claude/settings.local.json`. The `outputStyle` setting value is case-sensitive (`Explanatory`); a non-matching value falls back to Default.",
+        "Custom style = Markdown file in `~/.claude/output-styles` (user), `.claude/output-styles` (project) or managed policy; plugins can ship them in `output-styles/`. Frontmatter: `name`, `description`, `keep-coding-instructions` (default `false`), and plugin-only `force-for-plugin`.",
+        "By default a custom style **removes** Claude Code's built-in software-engineering instructions from the full system prompt; set `keep-coding-instructions: true` to retain them when you only want to change communication.",
+        "Styles apply to the main conversation and forks; other subagents run their own system prompt, so styles do not change them. A style is an instruction, not enforcement."
+      ],
+      "example": {
+        "title": "Custom output style that keeps coding behavior",
+        "language": "text",
+        "code": "# .claude/output-styles/diagrams-first.md\n---\nname: Diagrams first\ndescription: Lead every explanation with a diagram\nkeep-coding-instructions: true\n---\n\nWhen explaining code, architecture, or data flow, start with a Mermaid diagram\nshowing the structure, then explain in prose."
+      },
+      "examTips": [
+        "Output style = HOW Claude responds; CLAUDE.md = WHAT Claude knows about the project; hook = what MUST happen.",
+        "Forgetting `keep-coding-instructions: true` in a coding-oriented custom style drops the built-in engineering guidance."
+      ],
+      "source": "https://code.claude.com/docs/en/output-styles"
+    },
+    {
+      "heading": "CLAUDE.md and project memory",
+      "notes": [
+        "CLAUDE.md files give Claude persistent instructions loaded at the start of every session. They are **context, not enforced configuration**: to block an action regardless of what Claude decides, use a `PreToolUse` hook or `permissions.deny`.",
+        "Locations/scopes: **managed policy** (e.g. `/Library/Application Support/ClaudeCode/CLAUDE.md` on macOS, `/etc/claude-code/CLAUDE.md` on Linux), **project** (`./CLAUDE.md` or `./.claude/CLAUDE.md`, shared via git), **user** (`~/.claude/CLAUDE.md`), **local** (`./CLAUDE.local.md`, gitignored, personal). Files in the directory tree above the working directory load at launch; files in subdirectories load on demand. All levels are additive.",
+        "Import other files with `@path/to/file` (relative paths resolve from the importing file; recursion up to four hops). Imports organize but do **not** reduce context cost. Import syntax is skipped inside code spans/blocks.",
+        "Target **under 200 lines** per file; longer files reduce adherence. Move multi-step procedures or part-of-codebase content to skills or **path-scoped rules** in `.claude/rules/*.md` (with `paths:` frontmatter, loaded only when matching files are touched).",
+        "`/init` generates a starting CLAUDE.md from your codebase; `/memory` manages memory files. **Auto memory** is separate: notes Claude writes itself (first 200 lines/25KB loaded each session).",
+        "Managed CLAUDE.md is for behavioral guidance; use managed **settings** (`permissions.deny`, sandbox) for technical enforcement. `claudeMdExcludes` can skip other CLAUDE.md files but not the managed one.",
+        "In the Agent SDK, CLAUDE.md loads only when `settingSources` includes the right source (`project`, `user`, `local`); omitting `settingSources` loads all three. Alternatively inject context through `systemPrompt`."
+      ],
+      "example": {
+        "title": "Concise project CLAUDE.md with imports",
+        "language": "text",
+        "code": "# CLAUDE.md\n\nSee @README for project overview and @package.json for npm commands.\n\n## Conventions\n- Use pnpm, not npm. Run `pnpm test` before committing.\n- API handlers live in src/api/, one file per route.\n- Never edit generated files in src/gen/.\n\n# Personal overrides go in CLAUDE.local.md (add to .gitignore)"
+      },
+      "examTips": [
+        "Instruction like 'never edit .env' in CLAUDE.md is a request; a PreToolUse hook is the guarantee.",
+        "Contradictory instructions across CLAUDE.md files may be resolved arbitrarily - there is no strict precedence between levels.",
+        "Big CLAUDE.md? Move reference material to skills or path-scoped rules, not just @imports."
+      ],
+      "source": "https://code.claude.com/docs/en/memory"
+    },
+    {
+      "heading": "MCP as an extension mechanism",
+      "notes": [
+        "MCP (Model Context Protocol) connects Claude Code to external tools, databases and APIs. Use it when you keep copying data from another system into chat.",
+        "Transports: **HTTP** (recommended for remote servers), **SSE** (deprecated), **stdio** (local processes), WebSocket. Add with `claude mcp add --transport http <name> <url>` or `claude mcp add --transport stdio <name> -- npx -y some-server`.",
+        "Scopes: **local** (default; current project, private, stored in `~/.claude.json`), **project** (`.mcp.json` in repo root, shared via version control), **user** (all your projects). Precedence for same-named servers: local > project > user > plugin > claude.ai connectors; fields are not merged.",
+        "`.mcp.json` supports `${VAR}` and `${VAR:-default}` expansion in command, args, env, url, headers. Interactive sessions ask before using project-scoped servers; a cloned repo cannot approve its own servers in an untrusted folder.",
+        "Remote servers that need OAuth are authenticated through `/mcp` (or `claude mcp login`). **Tool search** is on by default so idle MCP tools use minimal context (names load, schemas deferred). Tool output over 25,000 tokens is limited by default.",
+        "MCP supplies **tools and data access**; a skill supplies the **knowledge of how to use them well**. They combine well (MCP database connection + skill documenting your schema).",
+        "In the Agent SDK pass servers via the `mcpServers` option. Hooks can also call an MCP tool (`mcp_tool` handler type)."
+      ],
+      "example": {
+        "title": "Project-scoped .mcp.json",
+        "language": "json",
+        "code": "{\n  \"mcpServers\": {\n    \"api-server\": {\n      \"type\": \"http\",\n      \"url\": \"${API_BASE_URL:-https://api.example.com}/mcp\",\n      \"headers\": { \"Authorization\": \"Bearer ${API_KEY}\" }\n    }\n  }\n}"
+      },
+      "examTips": [
+        "Share an MCP server with the team = project scope (`.mcp.json` committed). Keep it private = local or user scope.",
+        "MCP vs skill: MCP gives capability (connection/tools); skill gives instructions/knowledge. Don't pick MCP just to hold a style guide.",
+        "Use `${VAR}` expansion rather than hardcoding secrets into a committed `.mcp.json`."
+      ],
+      "source": "https://code.claude.com/docs/en/mcp"
+    },
+    {
+      "heading": "Hooks as deterministic extensions",
+      "notes": [
+        "Hooks run at lifecycle events and give **deterministic** control: the action happens because Claude Code runs it, not because the model chooses to. Zero context cost unless the hook returns output.",
+        "Key events: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `Stop`, `SubagentStop`, `PreCompact`, `Notification`, `SessionEnd`, and more.",
+        "Config nesting: `hooks` -> event name -> array of **matcher groups** -> `hooks` array of handlers. Matcher filters by `tool_name` for tool events (`Bash`, `Edit|Write`, or a regex such as `mcp__memory__.*`). An `if` field can add a permission-rule filter like `Bash(git *)`.",
+        "Handler types: `command` (shell; input JSON on **stdin**), `http` (POST), `mcp_tool`, `prompt` (single-turn LLM decision, uses `$ARGUMENTS`), and `agent` (verifier subagent, experimental). Use prompt/agent hooks when a decision needs judgment.",
+        "**Exit codes:** `0` = success (stdout JSON is parsed); `2` = **blocking error** (stderr is shown to Claude as the reason; on blockable events the action stops); any other code = non-blocking error and the action proceeds. Set `onFailure: \"block\"` to fail closed.",
+        "JSON output (exit 0): `PreToolUse` uses `hookSpecificOutput.permissionDecision` of `allow`/`deny`/`ask`/`defer` (and can rewrite input with `updatedInput`); events like `UserPromptSubmit`, `PostToolUse`, `Stop` use top-level `decision: \"block\"` with `reason`. Exit 2 still blocks even if JSON says allow.",
+        "Hooks live in `~/.claude/settings.json`, `.claude/settings.json`, `.claude/settings.local.json`, managed settings, plugin `hooks/hooks.json`, or skill/subagent frontmatter. Hooks from all sources **merge**.",
+        "In the Agent SDK use filesystem hooks (loaded via `settingSources`) or **programmatic hook callbacks** in the `hooks` option, which return `{}` to allow or a `hookSpecificOutput` deny object."
+      ],
+      "example": {
+        "title": "Block destructive Bash commands with PreToolUse",
+        "language": "bash",
+        "code": "# .claude/settings.json\n# {\n#   \"hooks\": { \"PreToolUse\": [ {\n#     \"matcher\": \"Bash\",\n#     \"hooks\": [ { \"type\": \"command\", \"if\": \"Bash(rm *)\",\n#                  \"command\": \"${CLAUDE_PROJECT_DIR}/.claude/hooks/block-rm.sh\" } ]\n#   } ] }\n# }\n\n#!/bin/bash\n# .claude/hooks/block-rm.sh  (stdin = event JSON)\nCOMMAND=$(jq -r '.tool_input.command')\nif echo \"$COMMAND\" | grep -q 'rm -rf'; then\n  jq -n '{hookSpecificOutput:{hookEventName:\"PreToolUse\",permissionDecision:\"deny\",permissionDecisionReason:\"Destructive command blocked by hook\"}}'\nelse\n  exit 0   # no decision: normal permission flow applies\nfi"
+      },
+      "examTips": [
+        "Exit code 2 blocks; exit 1 does NOT block (non-blocking error). This is a favorite trap.",
+        "Exit 0 with no output from a PreToolUse hook does not approve the call; it defers to the normal permission flow.",
+        "'Run the linter after every edit' = PostToolUse hook with matcher `Edit|Write`. 'Stop dangerous commands' = PreToolUse.",
+        "Hooks are the right place for guardrails; CLAUDE.md instructions are not guarantees."
+      ],
+      "source": "https://code.claude.com/docs/en/hooks"
+    },
+    {
+      "heading": "Agent SDK customization",
+      "notes": [
+        "The Agent SDK (Python and TypeScript) embeds Claude Code's agent loop, built-in tools, permissions, sessions and hooks in your own app. Unlike the Client SDK you do not write the tool loop; unlike Managed Agents you run the process yourself.",
+        "**`settingSources`** (`setting_sources` in Python) controls which filesystem settings load: `\"user\"` (`~/.claude/`), `\"project\"` (`<cwd>/.claude/`, CLAUDE.md, rules, skills, commands, subagents), `\"local\"` (`CLAUDE.local.md`, `settings.local.json`). Omitting it equals all three; `[]` disables them so the agent has only what you configure in code.",
+        "Managed policy settings, `~/.claude.json`, auto memory and claude.ai MCP connectors load regardless of `settingSources`. For multi-tenant isolation use separate filesystems, `settingSources: []`, and disable auto memory.",
+        "Programmatic customization: `agents` (define subagents; add `Agent` to `allowedTools`), `mcpServers`, `hooks` (callbacks), `allowedTools`, `systemPrompt`, `skills` (`\"all\"`, list, or `[]`), and plugins loaded by local path. Skills themselves cannot be registered programmatically.",
+        "Custom slash commands and skills in `.claude/commands/` and `.claude/skills/` are picked up in SDK sessions the same way as in the CLI when the right setting source is enabled."
+      ],
+      "example": {
+        "title": "SDK agent loading project config plus a hook",
+        "language": "python",
+        "code": "from claude_agent_sdk import query, ClaudeAgentOptions, HookMatcher\n\nasync def audit_bash(input_data, tool_use_id, context):\n    cmd = input_data.get(\"tool_input\", {}).get(\"command\", \"\")\n    if \"rm -rf\" in cmd:\n        return {\"hookSpecificOutput\": {\n            \"hookEventName\": \"PreToolUse\",\n            \"permissionDecision\": \"deny\",\n            \"permissionDecisionReason\": \"Destructive command blocked\"}}\n    return {}  # allow\n\noptions = ClaudeAgentOptions(\n    setting_sources=[\"user\", \"project\"],   # CLAUDE.md, skills, agents, settings\n    skills=\"all\",\n    allowed_tools=[\"Read\", \"Grep\", \"Glob\"],\n    hooks={\"PreToolUse\": [HookMatcher(matcher=\"Bash\", hooks=[audit_bash])]},\n)\n# async for message in query(prompt=\"Review this PR\", options=options): ..."
+      },
+      "examTips": [
+        "If an SDK agent ignores your CLAUDE.md or skills, check `settingSources` - an empty list or missing `project` source is the usual cause.",
+        "Subagents in the SDK need `agents` defined and the `Agent` tool allowed.",
+        "Programmatic hook callbacks return `{}` to allow, or a deny decision object to block."
+      ],
+      "source": "https://code.claude.com/docs/en/agent-sdk/claude-code-features"
+    },
+    {
+      "heading": "Decision guide: CLAUDE.md vs skills vs commands vs subagents vs hooks vs MCP",
+      "notes": [
+        "**CLAUDE.md** - facts and rules Claude should hold in every session (build commands, conventions, 'never do X'). Always loaded, so keep it short. Not enforced.",
+        "**Skill** - reference material needed sometimes, or a repeatable workflow you or Claude trigger by name. Description always in context, body on demand. Add `disable-model-invocation: true` for side-effecting actions.",
+        "**Custom command** - a saved prompt invoked with `/name`; now just a skill (a `.claude/commands/*.md` file still works). Use `$ARGUMENTS` for parameters and `allowed-tools` to skip prompts.",
+        "**Subagent** - context isolation, parallel research, specialized worker with its own tools/model/system prompt; only a summary returns.",
+        "**Hook** - must happen every time or must be blocked, no model judgment needed (format after edit, block `rm -rf`, notify). Deterministic, zero context cost.",
+        "**MCP** - Claude needs tools or data from an external system (database, Slack, browser). Pair with a skill that teaches how to use it.",
+        "**Output style** - change the voice, length, or role for the whole session.",
+        "**Plugin/marketplace** - package and distribute any combination to other repos or teammates, versioned and namespaced.",
+        "Combination patterns: Skill + MCP, Skill + Subagent (`context: fork` or `skills:` preload), CLAUDE.md + Skills, Hook + MCP."
+      ],
+      "example": {
+        "title": "Scenario-to-mechanism cheat sheet",
+        "language": "text",
+        "code": "\"Always use pnpm; tests in /tests\"              -> CLAUDE.md\n\"Release checklist, run on demand\"              -> skill (disable-model-invocation: true)\n\"/review-pr 482 with args\"                      -> skill/command using $ARGUMENTS\n\"Read 50 files, return only findings\"           -> subagent\n\"Run prettier after every edit\"                 -> PostToolUse hook\n\"Never allow writes to .env\"                    -> PreToolUse hook / permissions.deny\n\"Query our Postgres from chat\"                  -> MCP server (+ skill for schema)\n\"Answer concisely, teach me as you go\"          -> output style\n\"Give the same setup to 5 repos\"                -> plugin via marketplace"
+      },
+      "examTips": [
+        "Decision rule: always-on knowledge -> CLAUDE.md; on-demand knowledge/workflow -> skill; isolation -> subagent; guarantee -> hook; external system -> MCP; response style -> output style; distribution -> plugin.",
+        "When two options look right, prefer the one matching the *guarantee level*: instructions (CLAUDE.md, skill, style) are advisory, hooks and permissions are enforced."
+      ],
+      "source": "https://code.claude.com/docs/en/features-overview"
+    }
+  ],
+  "keyTakeaways": [
+    "A skill is a directory with SKILL.md (YAML frontmatter + Markdown); on the platform `name` (<=64 chars, lowercase/digits/hyphens, no 'anthropic'/'claude') and `description` (<=1,024 chars, what + when) are required.",
+    "Progressive disclosure: metadata always loaded, SKILL.md body on trigger, bundled files/scripts on demand (scripts contribute only their output).",
+    "API skills need `container.skills` plus the code execution tool, max 20 per request, no network, workspace-wide sharing; custom skills do not sync between API, claude.ai and Claude Code.",
+    "Custom commands are merged into skills: `.claude/commands/x.md` and `.claude/skills/x/SKILL.md` both give `/x`; the skill wins on a clash.",
+    "`$ARGUMENTS` is the argument string; `allowed-tools` pre-approves tools for that turn and does not restrict others.",
+    "Subagents are Markdown files in `.claude/agents/` (project) or `~/.claude/agents/` (user) with their own context, tools, model; only `name` and `description` required; omitted `tools` means inherit all.",
+    "Plugins bundle skills/agents/hooks/MCP via `.claude-plugin/plugin.json`; marketplaces are catalogs via `.claude-plugin/marketplace.json`; install as `plugin@marketplace`; plugin skills are namespaced.",
+    "Output styles change role/tone/format; custom ones drop coding instructions unless `keep-coding-instructions: true`.",
+    "CLAUDE.md is advisory context loaded every session: keep under about 200 lines, use `@imports`, `.claude/rules/`, `CLAUDE.local.md` for personal notes.",
+    "Hooks are deterministic: exit code 2 blocks, other non-zero codes do not; PreToolUse can return permissionDecision allow/deny/ask.",
+    "MCP scopes: local (default), project (`.mcp.json`, shared), user; HTTP transport recommended, SSE deprecated.",
+    "Agent SDK loads CLAUDE.md/skills/agents/hooks from the filesystem per `settingSources` (default all three; `[]` disables); skills cannot be registered programmatically."
+  ],
+  "glossary": [
+    {"term": "Agent Skill", "definition": "A directory with a SKILL.md (and optional files/scripts) that gives Claude on-demand expertise and workflows."},
+    {"term": "Progressive disclosure", "definition": "Loading skill content in stages: metadata first, instructions when triggered, resources only when needed."},
+    {"term": "Frontmatter", "definition": "YAML block between --- markers at the top of SKILL.md, agent files and output styles that configures them."},
+    {"term": "$ARGUMENTS", "definition": "Placeholder replaced with the text typed after a slash command or skill name."},
+    {"term": "allowed-tools", "definition": "Frontmatter field that pre-approves listed tools (no prompt) for the turn a skill or command runs; does not block other tools."},
+    {"term": "disable-model-invocation", "definition": "Skill frontmatter flag that prevents Claude from auto-loading the skill; only the user can invoke it."},
+    {"term": "context: fork", "definition": "Skill setting that runs the skill in an isolated subagent that has no conversation history."},
+    {"term": "Subagent", "definition": "A specialized assistant defined in a Markdown file that runs in its own context window and returns a summary."},
+    {"term": "Plugin", "definition": "A directory of skills, agents, hooks, and MCP servers installed as one unit, with a .claude-plugin/plugin.json manifest."},
+    {"term": "Marketplace", "definition": "A catalog (.claude-plugin/marketplace.json) listing plugins and where to fetch them."},
+    {"term": "Output style", "definition": "Session-wide instructions that set Claude's role, tone, and response format."},
+    {"term": "CLAUDE.md", "definition": "Markdown file of persistent project instructions loaded into context at session start; advisory, not enforced."},
+    {"term": "Hook", "definition": "A command, HTTP call, prompt, or agent that Claude Code runs automatically at a lifecycle event."},
+    {"term": "MCP", "definition": "Model Context Protocol, an open protocol for connecting Claude to external tools and data sources."},
+    {"term": "settingSources", "definition": "Agent SDK option choosing which filesystem settings (user, project, local) to load; empty list disables them."},
+    {"term": "Code execution tool", "definition": "Tool whose container hosts Agent Skills when used through the Messages API."}
+  ],
+  "quiz": [
+    {
+      "q": "A team wants every Claude Code session in a repo to know that the project uses pnpm and that generated files in src/gen/ must not be edited. Developers also want this shared through git. What is the best mechanism?",
+      "options": ["A project CLAUDE.md committed to the repo", "A user-scoped output style", "A skill with disable-model-invocation: true", "A local-scope MCP server"],
+      "answer": 0,
+      "explanation": "Always-on project conventions belong in a project CLAUDE.md shared via version control. An output style governs response format, a user-invocable-only skill would never be loaded automatically, and MCP is for external tools.",
+      "source": "https://code.claude.com/docs/en/features-overview"
+    },
+    {
+      "q": "A security lead needs to guarantee that Claude can never run `rm -rf` through the Bash tool, even if it decides to. Which approach provides that guarantee?",
+      "options": ["Add 'never run rm -rf' to CLAUDE.md", "Write a PreToolUse hook that denies matching Bash commands", "Create a skill describing safe shell usage", "Set a Concise output style"],
+      "answer": 1,
+      "explanation": "Hooks run deterministically at lifecycle events; a PreToolUse hook returning a deny decision (or exiting 2) blocks the call. CLAUDE.md, skills and output styles are instructions the model may not follow.",
+      "source": "https://code.claude.com/docs/en/hooks-guide"
+    },
+    {
+      "q": "A PreToolUse hook script detects a forbidden command but exits with status 1 after printing an error to stderr. What happens?",
+      "options": ["The tool call is blocked and Claude sees stderr", "The tool call proceeds; it is treated as a non-blocking error", "Claude Code crashes the session", "The call is automatically approved and skips permissions"],
+      "answer": 1,
+      "explanation": "Only exit code 2 is a blocking error. Other non-zero codes are non-blocking and the action proceeds (unless onFailure is set to block). To block, exit 2 or return a deny permissionDecision as JSON with exit 0.",
+      "source": "https://code.claude.com/docs/en/hooks"
+    },
+    {
+      "q": "You upload a custom skill through the Claude API and call the Messages API with `container.skills` set correctly, but no tools listed. The skill never runs. What is missing?",
+      "options": ["A beta header named skills-2025-10-02 is the only requirement", "The code execution tool, whose container the skills run in", "A CLAUDE.md file in the workspace", "The skill must be re-uploaded to claude.ai first"],
+      "answer": 1,
+      "explanation": "Skills on the API require the code execution tool, which provides the container. Custom skills do not sync from claude.ai, and CLAUDE.md is a Claude Code concept.",
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview"
+    },
+    {
+      "q": "A developer uploads a skill zip to claude.ai and expects their API integration to use it automatically. Why does this fail?",
+      "options": ["API skills must be under 1 KB", "Custom skills do not sync across surfaces; it must be uploaded to the API separately", "claude.ai skills are only usable in Claude Code", "The skill name contains uppercase letters"],
+      "answer": 1,
+      "explanation": "Custom skills are per-surface: claude.ai, the API (workspace-wide), and Claude Code (filesystem) are managed independently.",
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview"
+    },
+    {
+      "q": "Which skill name is valid on the Claude platform?",
+      "options": ["claude-code-helper", "PDF_Processing", "pdf-processing", "anthropic-pdf"],
+      "answer": 2,
+      "explanation": "Names allow only lowercase letters, numbers and hyphens (max 64 chars) and cannot contain reserved words 'anthropic' or 'claude'. Underscores and uppercase are invalid too.",
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview"
+    },
+    {
+      "q": "A skill folder contains SKILL.md, a 40-page REFERENCE.md, and scripts/validate.py. A user request only needs the main workflow. Which content consumes context tokens?",
+      "options": ["All files, since they are in the same directory", "Only name and description at startup, plus the SKILL.md body once triggered", "Only the validate.py source code", "Nothing until the user types a slash command"],
+      "answer": 1,
+      "explanation": "Progressive disclosure loads metadata at startup, the SKILL.md body when triggered, and bundled files only when referenced. Scripts, when run, contribute only their output.",
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview"
+    },
+    {
+      "q": "A command file includes `allowed-tools: Bash(git add *) Bash(git commit *)`. A teammate says Claude therefore cannot use any other tool while the command runs. Is that correct?",
+      "options": ["Yes, allowed-tools is a strict allowlist", "No, it only pre-approves those tools for the turn; other tools stay available under normal permissions", "Yes, but only for MCP tools", "No, allowed-tools is ignored in project files"],
+      "answer": 1,
+      "explanation": "allowed-tools skips the permission prompt for the listed tools for the invoking turn; it does not restrict anything. Use disallowed-tools or permissions to remove tools.",
+      "source": "https://code.claude.com/docs/en/skills"
+    },
+    {
+      "q": "Your repo has both `.claude/commands/deploy.md` and `.claude/skills/deploy/SKILL.md`. A teammate types `/deploy`. What runs?",
+      "options": ["The command file", "The skill, because skills take precedence over command files with the same name", "Both run in sequence", "An error is raised"],
+      "answer": 1,
+      "explanation": "Custom commands were merged into skills; both create /deploy, and the skill wins when names collide.",
+      "source": "https://code.claude.com/docs/en/skills"
+    },
+    {
+      "q": "A task requires reading dozens of files to find where a library is misused and then reporting only a short list of findings, without cluttering the main conversation. Which feature fits best?",
+      "options": ["A CLAUDE.md entry", "A subagent", "An output style", "A Notification hook"],
+      "answer": 1,
+      "explanation": "Subagents run in isolated context windows and return only a summary, protecting the main context. The others do not isolate work.",
+      "source": "https://code.claude.com/docs/en/sub-agents"
+    },
+    {
+      "q": "You create `.claude/agents/auditor.md` with only `name` and `description` and expect it to be read-only. It edits files. Why?",
+      "options": ["Subagents can always write files", "Omitting `tools` makes the subagent inherit all available tools; you must list a restricted `tools` allowlist", "The file must be in ~/.claude/agents", "The description must contain the word read-only"],
+      "answer": 1,
+      "explanation": "tools is an allowlist; when omitted the subagent inherits every available tool. Specify `tools: Read, Grep, Glob` (or use disallowedTools) to restrict.",
+      "source": "https://code.claude.com/docs/en/sub-agents"
+    },
+    {
+      "q": "An organization wants to distribute a bundle of two skills, a reviewer subagent and an MCP server to many repositories with versioned updates. What should it build?",
+      "options": ["A larger CLAUDE.md", "A plugin published through a marketplace (marketplace.json)", "A user-level output style", "A programmatic hook callback"],
+      "answer": 1,
+      "explanation": "Plugins package skills, agents, hooks and MCP servers as one installable unit; a marketplace catalogs and distributes them (installed as plugin@marketplace).",
+      "source": "https://code.claude.com/docs/en/plugins"
+    },
+    {
+      "q": "After installing `review-tools` from a marketplace, how is its `review` skill invoked, and why?",
+      "options": ["/review, because skills are global", "/review-tools:review, because plugin skills are namespaced by plugin name", "/skill review-tools", "It can only be invoked by Claude, never by the user"],
+      "answer": 1,
+      "explanation": "Plugin skills are namespaced as /plugin-name:skill-name so several plugins can coexist without collisions.",
+      "source": "https://code.claude.com/docs/en/plugins"
+    },
+    {
+      "q": "A writer wants Claude Code to act as a writing assistant that answers tersely for the whole session and no longer follows software-engineering conventions. What is the right customization?",
+      "options": ["A custom output style without keep-coding-instructions", "A PreToolUse hook", "A project .mcp.json", "A subagent with permissionMode plan"],
+      "answer": 0,
+      "explanation": "Output styles set role, tone and format for the whole session; custom styles drop Claude Code's built-in engineering instructions unless keep-coding-instructions is true.",
+      "source": "https://code.claude.com/docs/en/output-styles"
+    },
+    {
+      "q": "A team needs a database server available to every developer, defined in version control, with credentials supplied from each developer's environment. Which setup is correct?",
+      "options": ["`claude mcp add` at default local scope with the password inline", "Project-scoped `.mcp.json` using `${DB_TOKEN}` expansion in headers/env", "A CLAUDE.md section containing the password", "A user-level skill containing the connection string"],
+      "answer": 1,
+      "explanation": "Project scope (.mcp.json) is shared via git, and ${VAR} expansion keeps secrets out of the committed file. Local scope is private, and CLAUDE.md or skills would expose secrets and don't provide a connection.",
+      "source": "https://code.claude.com/docs/en/mcp"
+    },
+    {
+      "q": "A Python Agent SDK service sets `setting_sources=[]` and then notices the agent no longer follows the repository's CLAUDE.md or loads its skills. What explains this?",
+      "options": ["Empty setting sources disables user, project and local filesystem settings, so CLAUDE.md and .claude/skills are not loaded", "CLAUDE.md is only supported in the CLI", "Skills require the Client SDK", "The SDK always ignores CLAUDE.md"],
+      "answer": 0,
+      "explanation": "settingSources controls loading of CLAUDE.md, rules, skills, commands, agents and hooks from the filesystem. Omitting it loads user, project and local; [] disables them, limiting the agent to programmatic configuration.",
+      "source": "https://code.claude.com/docs/en/agent-sdk/claude-code-features"
+    }
+  ]
+}

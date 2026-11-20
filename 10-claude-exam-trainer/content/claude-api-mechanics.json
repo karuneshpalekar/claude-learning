@@ -1,0 +1,571 @@
+{
+ "slug": "claude-api-mechanics",
+ "title": "Claude API Mechanics",
+ "overview": "This objective covers how to call the Claude API correctly: the Messages request and response shape, content blocks, stop reasons, streaming events, multimodal input, token counting, batching, the Files API, prompt caching, thinking parameters, headers, SDK behavior, errors and rate limits. The exam tests precise facts and trade-offs (which parameter, which status code, what counts toward limits), so memorizing the mechanics and their traps matters. Docs have moved on from older material (sampling params removed on new models, extended thinking now legacy), so know the current behavior.",
+ "sources": [
+  {
+   "title": "Using the Messages API",
+   "url": "https://platform.claude.com/docs/en/build-with-claude/working-with-messages"
+  },
+  {
+   "title": "Messages API reference",
+   "url": "https://platform.claude.com/docs/en/api/messages/create"
+  },
+  {
+   "title": "Handling stop reasons",
+   "url": "https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons"
+  },
+  {
+   "title": "Streaming messages",
+   "url": "https://platform.claude.com/docs/en/build-with-claude/streaming"
+  },
+  {
+   "title": "Extended thinking",
+   "url": "https://platform.claude.com/docs/en/build-with-claude/extended-thinking"
+  },
+  {
+   "title": "Token counting",
+   "url": "https://platform.claude.com/docs/en/build-with-claude/token-counting"
+  },
+  {
+   "title": "Batch processing",
+   "url": "https://platform.claude.com/docs/en/build-with-claude/batch-processing"
+  },
+  {
+   "title": "Files API",
+   "url": "https://platform.claude.com/docs/en/build-with-claude/files"
+  },
+  {
+   "title": "Vision",
+   "url": "https://platform.claude.com/docs/en/build-with-claude/vision"
+  },
+  {
+   "title": "PDF support",
+   "url": "https://platform.claude.com/docs/en/build-with-claude/pdf-support"
+  },
+  {
+   "title": "Prompt caching",
+   "url": "https://platform.claude.com/docs/en/build-with-claude/prompt-caching"
+  },
+  {
+   "title": "API overview",
+   "url": "https://platform.claude.com/docs/en/api/overview"
+  },
+  {
+   "title": "Errors",
+   "url": "https://platform.claude.com/docs/en/api/errors"
+  },
+  {
+   "title": "Rate limits",
+   "url": "https://platform.claude.com/docs/en/api/rate-limits"
+  }
+ ],
+ "sections": [
+  {
+   "heading": "Messages API request and response",
+   "notes": [
+    "`POST https://api.anthropic.com/v1/messages` is the core endpoint. Required body fields: `model`, `max_tokens`, `messages`.",
+    "The API is **stateless**: every request must carry the full conversation history. Earlier assistant turns can be synthetic (not actually produced by Claude).",
+    "`messages` holds `user` and `assistant` turns; consecutive same-role turns are merged. The conversation must normally end with a user turn.",
+    "Top-level `system` (string or array of text blocks) carries instructions that apply from the start. On newer models a `role: \"system\"` message can also be added mid-conversation after a user turn; it cannot be the first entry and, being appended, it does not invalidate the cached prefix before it.",
+    "`max_tokens` is the hard cap on generated tokens (thinking tokens count toward it). The model may stop earlier. `max_tokens: 0` is a cache pre-warming mode that returns empty content.",
+    "Response is a `Message` object: `id`, `type: message`, `role: assistant`, `content` (array of blocks), `model`, `stop_reason`, `stop_sequence`, `usage` (and `stop_details` on refusals).",
+    "Prefilling a final assistant message is rejected with a 400 on Claude 4.6 and later models; use structured outputs or system-prompt instructions instead."
+   ],
+   "examTips": [
+    "The API does not remember conversations; if you omit earlier turns Claude has no memory of them.",
+    "`system` is a top-level parameter, not a message role in the classic design. Do not put the initial system prompt inside `messages`.",
+    "`max_tokens` is required; forgetting it is a 400 invalid_request_error."
+   ],
+   "source": "https://platform.claude.com/docs/en/build-with-claude/working-with-messages",
+   "example": {
+    "title": "Minimal request and response",
+    "language": "bash",
+    "code": "curl https://api.anthropic.com/v1/messages \\\n  -H \"x-api-key: $ANTHROPIC_API_KEY\" \\\n  -H \"anthropic-version: 2026-10-21\" \\\n  -H \"content-type: application/json\" \\\n  -d '{\n    \"model\": \"claude-opus-5-5\",\n    \"max_tokens\": 1024,\n    \"system\": \"You are a concise assistant.\",\n    \"messages\": [{\"role\": \"user\", \"content\": \"Hello, Claude\"}]\n  }'\n# -> {\"id\":\"msg_...\",\"type\":\"message\",\"role\":\"assistant\",\n#     \"content\":[{\"type\":\"text\",\"text\":\"Hello!\"}],\n#     \"stop_reason\":\"end_turn\",\"stop_sequence\":null,\n#     \"usage\":{\"input_tokens\":12,\"output_tokens\":6}}"
+   }
+  },
+  {
+   "heading": "Content blocks (request and response)",
+   "notes": [
+    "`content` can be a plain string (shorthand for one text block) or an array of typed blocks.",
+    "Input block types you send include `text`, `image`, `document`, `search_result`, `tool_use`, `tool_result`, `thinking`, `redacted_thinking` and server-tool result blocks.",
+    "Response block types include `text` (may carry `citations`), `thinking` (with a `signature`), `redacted_thinking` (opaque `data`), `tool_use` (`id`, `name`, `input`), `server_tool_use`, and server-tool result blocks (web search, web fetch, code execution, tool search), plus `container_upload`.",
+    "A `tool_use` block's `input` is always an object. Every `tool_use` must be answered by a `tool_result` block (matching `tool_use_id`) in the next user message.",
+    "Citations type depends on the source: PDF gives `page_location`, plain text gives `char_location`, custom content documents give `content_block_location`."
+   ],
+   "examTips": [
+    "Content blocks are the unit of everything: images, documents, tools, thinking. If a question asks 'where does X go', the answer is usually 'in a content block'.",
+    "Pass `thinking` and `redacted_thinking` blocks back unmodified when continuing a tool-use turn; editing them gives a 400."
+   ],
+   "source": "https://platform.claude.com/docs/en/api/messages/create",
+   "example": {
+    "title": "Mixed-content user turn",
+    "language": "json",
+    "code": "{\"role\":\"user\",\"content\":[\n  {\"type\":\"image\",\"source\":{\"type\":\"url\",\"url\":\"https://example.com/chart.png\"}},\n  {\"type\":\"text\",\"text\":\"What trend does this chart show?\"}\n]}"
+   }
+  },
+  {
+   "heading": "stop_reason values and stop_sequences",
+   "notes": [
+    "Seven documented values: `end_turn` (natural finish), `max_tokens` (hit your limit), `stop_sequence` (one of your custom strings was produced), `tool_use` (client tool call), `pause_turn` (server-tool loop hit iteration limit, default 10), `refusal` (HTTP 200, with `stop_details`), `model_context_window_exceeded`.",
+    "`stop_sequences` is an array of custom strings. When one is generated, generation stops, `stop_reason` is `stop_sequence`, and the `stop_sequence` field holds the matched string (otherwise `null`).",
+    "Handling: `max_tokens` means truncated output (raise the limit or continue); `tool_use` means run the tool and return `tool_result`; `pause_turn` means resend the assistant content unchanged (plus `container` id if present); `refusal` means read `stop_details.category` and retry/fallback.",
+    "Stop reasons are **not errors**: they arrive in successful 200 responses. In streaming, `stop_reason` is `null` in `message_start` and appears only in `message_delta`."
+   ],
+   "examTips": [
+    "`refusal` is a 200 with stop_reason, not a 4xx.",
+    "`max_tokens` stop with an incomplete `tool_use` block: retry with a higher limit, do not execute the partial input.",
+    "`pause_turn` is about server tools (web search etc.), not client tools."
+   ],
+   "source": "https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons",
+   "example": {
+    "title": "Dispatching on stop_reason",
+    "language": "python",
+    "code": "match response.stop_reason:\n    case \"tool_use\":      return handle_tool_use(response)\n    case \"max_tokens\":    return handle_truncation(response)\n    case \"pause_turn\":    return handle_pause(response)   # resend as-is\n    case \"refusal\":       return handle_refusal(response) # read stop_details\n    case _:               return next((b.text for b in response.content if b.type == \"text\"), \"\")"
+   }
+  },
+  {
+   "heading": "Sampling parameters and thinking parameters",
+   "notes": [
+    "`temperature`, `top_p`, `top_k` control randomness in older models. They are **not supported on Claude 4.7 and later models, nor on any model starting with API version `2026-10-21`**: non-default values (and from `2026-10-21` any value) return 400. Omit them and steer with prompting.",
+    "`thinking` config options: `{\"type\":\"adaptive\"}` (model decides when/how much to think; use with `output_config.effort`), `{\"type\":\"enabled\",\"budget_tokens\":N}` (manual extended thinking), `{\"type\":\"disabled\"}`. Sonnet 5.5 also has `between_tools`.",
+    "Extended thinking (`enabled` + `budget_tokens`) is now a **legacy** feature: `budget_tokens` must be at least 1,024 and less than `max_tokens` (except interleaved manual mode). Claude 4.7 and later reject `type: enabled` with a 400; use adaptive thinking.",
+    "Adaptive thinking is rejected on Claude 4.5 and earlier models (those need `enabled` + `budget_tokens`). Some newer models (e.g. Opus 5.5, Fable 5.1) cannot disable thinking at all.",
+    "Thinking tokens are billed as output tokens; `usage.output_tokens_details.thinking_tokens` shows how many. `display: \"omitted\"` hides thinking text without turning thinking off. Changing the thinking config or budget between requests invalidates message-level cache breakpoints.",
+    "Thinking blocks carry a `signature`; send them back unchanged on tool-use continuations. Streaming delivers `thinking_delta` then a `signature_delta` just before `content_block_stop`."
+   ],
+   "examTips": [
+    "If an exam scenario sets `temperature` on a recent model and gets a 400, the fix is to remove it.",
+    "`budget_tokens >= max_tokens` is invalid in normal mode; `budget_tokens < 1024` is invalid.",
+    "On new models, depth is controlled by `output_config.effort`, not `budget_tokens`."
+   ],
+   "source": "https://platform.claude.com/docs/en/build-with-claude/extended-thinking",
+   "example": {
+    "title": "Manual vs adaptive thinking",
+    "language": "json",
+    "code": "// Legacy manual mode (Claude 4.6 and earlier, deprecated on 4.6)\n{\"model\":\"claude-sonnet-4-6\",\"max_tokens\":16000,\n \"thinking\":{\"type\":\"enabled\",\"budget_tokens\":10000}}\n\n// Current approach on newer models\n{\"model\":\"claude-opus-5-5\",\"max_tokens\":16000,\n \"thinking\":{\"type\":\"adaptive\"},\n \"output_config\":{\"effort\":\"high\"}}"
+   }
+  },
+  {
+   "heading": "Streaming and SSE events",
+   "notes": [
+    "Set `\"stream\": true` to receive server-sent events. Flow: `message_start` (Message with empty content), then for each block `content_block_start`, one or more `content_block_delta`, `content_block_stop`, then one or more `message_delta`, and finally `message_stop`. `ping` events may appear anywhere; `error` events can occur mid-stream.",
+    "Delta types: `text_delta` (text), `input_json_delta` (`partial_json` string fragments for tool input; parse only after `content_block_stop`), `thinking_delta`, `signature_delta`, `citations_delta`.",
+    "Each block has an `index` matching its position in the final `content` array.",
+    "`message_delta` carries top-level changes: `stop_reason`, `stop_sequence` and **cumulative** `usage` token counts.",
+    "Because a stream returns HTTP 200 first, a later failure arrives as an `error` event and does not follow normal HTTP error handling.",
+    "Streaming is recommended for long requests (especially over 10 minutes) and large `max_tokens`. SDKs offer helpers to accumulate and return the final `Message` (e.g. `get_final_message()`)."
+   ],
+   "examTips": [
+    "stop_reason is null in message_start; read it from message_delta.",
+    "input_json_delta fragments are not valid JSON on their own; accumulate until content_block_stop.",
+    "Usage in message_delta is cumulative, not incremental."
+   ],
+   "source": "https://platform.claude.com/docs/en/build-with-claude/streaming",
+   "example": {
+    "title": "Raw stream for a short reply",
+    "language": "text",
+    "code": "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_...\",\"role\":\"assistant\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":25,\"output_tokens\":1}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":15}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}"
+   }
+  },
+  {
+   "heading": "Vision, PDFs and token counting",
+   "notes": [
+    "Images go in `image` blocks with one of three sources: `base64`, `url`, or `file` (a Files API `file_id`). Formats: JPEG, PNG, GIF, WebP (animated GIF uses first frame only). Place images before the text question for best results.",
+    "Image limits: up to 100 images per request for 200k-context models and 600 for others; max 8000x8000 px; 10 MB per image (base64) on the Claude API. The overall request cap is 128 MB. Token cost is patch based: `ceil(width/28) x ceil(height/28)` visual tokens, after any model downscaling.",
+    "PDFs go in `document` blocks (sources: base64, url or file; text/plain also works). Limits: 128 MB request, 600 pages per request (100 when the context window is under 1M). Each page is processed as text plus an image; roughly 1,500 to 3,000 text tokens per page, no extra PDF fee. `citations: {enabled: true}` gives `page_location` citations.",
+    "Token counting: `POST /v1/messages/count_tokens` accepts the same inputs as Messages (system, tools, images, PDFs, thinking) and returns `{\"input_tokens\": N}`. It is free, has its own RPM limits (5,000 / 10,000 / 20,000 by tier) separate from message creation, and is an **estimate**.",
+    "Count-tokens does not accept server tools or the MCP connector, and rejects `image`/`document` blocks with `url` or `file` sources (send base64 to count). It does not perform caching even if `cache_control` is present.",
+    "Claude 4.7 and later models use a newer tokenizer that produces roughly 30 percent more tokens for the same text; recount against the target model."
+   ],
+   "examTips": [
+    "Token counting is free and billed separately from rate limits, but it cannot validate url/file sources.",
+    "PDF page count and size limits are the usual cause of failed large-document requests; split the document.",
+    "Token counts differ across tokenizer generations."
+   ],
+   "source": "https://platform.claude.com/docs/en/build-with-claude/token-counting",
+   "example": {
+    "title": "Count tokens before sending",
+    "language": "bash",
+    "code": "curl https://api.anthropic.com/v1/messages/count_tokens \\\n  -H \"x-api-key: $ANTHROPIC_API_KEY\" \\\n  -H \"anthropic-version: 2026-10-21\" \\\n  -H \"content-type: application/json\" \\\n  -d '{\"model\":\"claude-opus-5-5\",\"system\":\"You are a scientist\",\n       \"messages\":[{\"role\":\"user\",\"content\":\"Hello, Claude\"}]}'\n# -> {\"input_tokens\": 14}"
+   }
+  },
+  {
+   "heading": "Message Batches API",
+   "notes": [
+    "`POST /v1/messages/batches` processes many Messages requests asynchronously at **50 percent** of standard prices. Each entry has a unique `custom_id` (1-64 chars, `^[a-zA-Z0-9_-]{1,64}$`) and `params` (a normal Messages body).",
+    "A batch is limited to 100,000 requests or 256 MB, whichever comes first. Most finish within 1 hour; batches expire if not done within 24 hours. Results stay downloadable for 29 days after creation.",
+    "Batch `processing_status` goes `in_progress` then `ended`. Poll the batch, then stream results from `results_url` (JSONL). Each line has `custom_id` and a `result` of type `succeeded`, `errored`, `canceled` or `expired`. Only succeeded requests are billed.",
+    "**Result order is not guaranteed**; always match by `custom_id`.",
+    "Validation of each request's `params` happens asynchronously, so errors show up when processing ends. Not supported in batches: `stream: true`, `speed` (fast mode), `fallbacks`, and `max_tokens: 0`. Thinking, vision, tool use and system prompts are all allowed.",
+    "For caching in batches, use the 1-hour cache TTL since batches may take longer than 5 minutes. Batches have their own RPM and queue limits; the maximum request size is 256 MB."
+   ],
+   "examTips": [
+    "Use Batch when latency is not needed and cost matters; use Messages for interactive responses.",
+    "Never rely on result order; use custom_id.",
+    "Expired and canceled requests are not billed."
+   ],
+   "source": "https://platform.claude.com/docs/en/build-with-claude/batch-processing",
+   "example": {
+    "title": "Create a batch and read results",
+    "language": "python",
+    "code": "batch = client.messages.batches.create(requests=[\n  {\"custom_id\":\"q1\",\"params\":{\"model\":\"claude-haiku-5-5\",\"max_tokens\":256,\n     \"messages\":[{\"role\":\"user\",\"content\":\"Summarize doc 1\"}]}},\n  {\"custom_id\":\"q2\",\"params\":{\"model\":\"claude-haiku-5-5\",\"max_tokens\":256,\n     \"messages\":[{\"role\":\"user\",\"content\":\"Summarize doc 2\"}]}},\n])\nwhile client.messages.batches.retrieve(batch.id).processing_status != \"ended\":\n    time.sleep(60)\nfor r in client.messages.batches.results(batch.id):\n    if r.result.type == \"succeeded\":\n        print(r.custom_id, r.result.message.content[0].text)"
+   }
+  },
+  {
+   "heading": "Files API",
+   "notes": [
+    "Upload once (`POST /v1/files`, multipart `file`), receive a `file_id`, then reference it in later requests: `document` or `image` blocks use `{\"source\":{\"type\":\"file\",\"file_id\":...}}`; datasets for code execution use a `container_upload` block.",
+    "The Files API is out of beta in current docs (no beta header required). Older integrations that send `files-api-2025-04-14` keep the old response shapes.",
+    "Limits: 500 MB per file, 1 TB per organization, about 500 file-related requests per minute. Files can be given an `expires_in_seconds` (3,600 to 7,776,000) at upload, fixed afterwards.",
+    "File operations (upload, list, get metadata, download, delete) are free; file content used in Messages is billed as input tokens.",
+    "Only files **created by skills or code execution** are downloadable; files you upload have `downloadable: false` and return 400 if you try to download them. Files cannot be modified after upload.",
+    "Files are scoped to the **workspace**, not to a user or session: any key in the workspace can use any file there. Never accept `file_id` values from end users; use a workspace per tenant for isolation."
+   ],
+   "examTips": [
+    "Files API is for reuse across calls; one-off small documents can just go in base64.",
+    "Files are not tenant-isolated within a workspace.",
+    "Count-tokens does not accept `file` sources."
+   ],
+   "source": "https://platform.claude.com/docs/en/build-with-claude/files",
+   "example": {
+    "title": "Upload then reference",
+    "language": "python",
+    "code": "uploaded = client.files.upload(\n    file=(\"report.pdf\", open(\"report.pdf\",\"rb\"), \"application/pdf\"))\nresp = client.messages.create(\n    model=\"claude-opus-5-5\", max_tokens=1024,\n    messages=[{\"role\":\"user\",\"content\":[\n        {\"type\":\"text\",\"text\":\"Summarize this document.\"},\n        {\"type\":\"document\",\"source\":{\"type\":\"file\",\"file_id\":uploaded.id}}]}])"
+   }
+  },
+  {
+   "heading": "Prompt caching mechanics",
+   "notes": [
+    "Two ways to enable: top-level `cache_control` (automatic breakpoint that moves to the last cacheable block) or explicit `cache_control: {\"type\":\"ephemeral\"}` on individual blocks in `tools`, `system` or `messages`. Up to **4 breakpoints** per request.",
+    "The cached prefix order is `tools`, then `system`, then `messages`, up to and including the marked block. Matching is exact and byte-for-byte; put the breakpoint on the last block identical across requests (not on timestamps or per-request content).",
+    "Default TTL is **5 minutes**, refreshed free on each hit. `\"ttl\": \"1h\"` extends it at a higher write price; 1-hour entries must precede 5-minute entries when mixed.",
+    "Pricing relative to base input: 5-minute write 1.25x, 1-hour write 2x, cache read 0.1x by default (0.05x on Opus 5.5 and Sonnet 5.5, 0.025x on Fable 5.1 and Mythos 5.1).",
+    "Minimum cacheable prompt length varies by model (512, 1,024, 2,048 or 4,096 tokens depending on model). Shorter prompts are processed without caching and without an error.",
+    "Usage fields: `cache_creation_input_tokens` (written), `cache_read_input_tokens` (read), `input_tokens` (uncached tokens **after the last breakpoint**), with `cache_creation.ephemeral_5m_input_tokens` and `ephemeral_1h_input_tokens` as TTL breakdown. Total input = cache_read + cache_creation + input_tokens.",
+    "The system checks the breakpoint's prefix and looks back up to 20 blocks for earlier entries. A cache entry is usable only after the first response begins, so parallel requests do not benefit.",
+    "Cache invalidators: changes to tool definitions (everything), `tool_choice` or adding/removing images (system and tools onward), thinking config changes (message-level). `max_tokens: 0` pre-warms the cache but is not allowed with streaming, thinking, structured outputs, forced tool_choice or batches."
+   ],
+   "examTips": [
+    "A low `input_tokens` with large `cache_read_input_tokens` is normal: input_tokens only counts what is after the last breakpoint.",
+    "If both cache fields are 0, the prompt was probably under the model minimum.",
+    "Cached reads do not count toward ITPM rate limits."
+   ],
+   "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-caching",
+   "example": {
+    "title": "Cache a long system prompt for 1 hour",
+    "language": "json",
+    "code": "{\n  \"model\": \"claude-opus-5-5\",\n  \"max_tokens\": 1024,\n  \"system\": [\n    {\"type\": \"text\", \"text\": \"<long static instructions>\",\n     \"cache_control\": {\"type\": \"ephemeral\", \"ttl\": \"1h\"}}\n  ],\n  \"messages\": [{\"role\": \"user\", \"content\": \"Summarize the key risks.\"}]\n}"
+   }
+  },
+  {
+   "heading": "Headers, versions and SDKs",
+   "notes": [
+    "Required headers on the Claude API: `anthropic-version` (e.g. `2026-10-21`) and `content-type: application/json`, plus authentication: `Authorization: Bearer <token>` or the legacy-but-supported `x-api-key: <key>`. `anthropic-workspace-id` is needed for keys not scoped to a workspace.",
+    "Official SDKs (Python, TypeScript, C#, Go, Java, PHP, Ruby) set auth, version and content-type headers automatically and add typed errors, retries, streaming helpers and timeout handling. Python/TypeScript SDK clients read `ANTHROPIC_API_KEY` by default.",
+    "Beta features are enabled with the `anthropic-beta` header (SDKs expose a `beta` namespace). A beta feature graduating out of beta may keep old behavior if you still send the header.",
+    "Every response carries `request-id` (also `request_id` in error bodies), `anthropic-organization-id` and `anthropic-workspace-id`. Python/TypeScript SDK objects expose `_request_id`. Quote the request ID to support.",
+    "Request size limits: Messages and token counting 128 MB, Batches 256 MB, Files 500 MB; exceeding gives 413 `request_too_large`.",
+    "Browsers add an Origin header; organizations with certain retention settings get a 401 CORS error for direct browser calls, so proxy through your back end."
+   ],
+   "examTips": [
+    "Missing `anthropic-version` on raw HTTP requests is an error; SDKs add it for you.",
+    "`x-api-key` still works but `Authorization: Bearer` is now the primary documented form."
+   ],
+   "source": "https://platform.claude.com/docs/en/api/overview",
+   "example": {
+    "title": "Raw headers",
+    "language": "bash",
+    "code": "-H \"x-api-key: $ANTHROPIC_API_KEY\"      # or Authorization: Bearer ...\n-H \"anthropic-version: 2026-10-21\"\n-H \"content-type: application/json\"\n-H \"anthropic-beta: <feature-name>\"      # only for beta features"
+   }
+  },
+  {
+   "heading": "Errors and retries",
+   "notes": [
+    "Error JSON: `{\"type\":\"error\",\"error\":{\"type\":...,\"message\":...},\"request_id\":...}`.",
+    "Codes: 400 `invalid_request_error`, 401 `authentication_error`, 402 `billing_error`, 403 `permission_error`, 404 `not_found_error`, 409 `conflict_error`, 413 `request_too_large`, 429 `rate_limit_error`, 500 `api_error`, 504 `timeout_error`, 529 `overloaded_error`.",
+    "Official SDKs automatically retry connection errors, 429s and 5xx with exponential backoff, **2 retries by default**, honoring `retry-after`. Configure with `max_retries` (or `maxRetries`). Prefer typed SDK exceptions over string matching.",
+    "Reaching a spend limit you set yields 400; reaching your tier's monthly spend cap yields 429 with **no** `retry-after`, so retries keep failing until access resumes.",
+    "Long non-streaming requests risk idle-connection drops; use streaming or Batch for requests over about 10 minutes. The SDK refuses non-streaming requests expected to exceed 10 minutes.",
+    "Mid-stream failures arrive as SSE `error` events after a 200. 529 means temporary API overload; 429 can also come from acceleration limits when traffic ramps too fast.",
+    "Common 400s on newer models: prefill, `thinking.type: enabled` on 4.7+, `disabled` on always-thinking models, sampling params, forced `tool_choice` on some models, edited thinking blocks."
+   ],
+   "examTips": [
+    "400 vs 429 vs 529: bad request, rate limited, overloaded. Only the last two are generally worth retrying.",
+    "Spend-cap 429 has no retry-after.",
+    "Retry 500/529/429 with exponential backoff and jitter; do not retry 400/401/403/404."
+   ],
+   "source": "https://platform.claude.com/docs/en/api/errors",
+   "example": {
+    "title": "Tuning SDK retries",
+    "language": "python",
+    "code": "client = anthropic.Anthropic(max_retries=5)   # default is 2\ntry:\n    msg = client.messages.create(model=\"claude-opus-5-5\", max_tokens=512,\n        messages=[{\"role\":\"user\",\"content\":\"hi\"}])\nexcept anthropic.RateLimitError as e:     # 429\n    print(e.response.headers.get(\"retry-after\"))\nexcept anthropic.APIStatusError as e:\n    print(e.status_code, e.response.headers.get(\"request-id\"))"
+   }
+  },
+  {
+   "heading": "Rate limits and usage fields",
+   "notes": [
+    "Rate limits are per organization, by usage tier (Start, Build, Scale, Custom) and model class: **RPM**, **ITPM** (input tokens per minute) and **OTPM** (output tokens per minute). Token-bucket algorithm: capacity replenishes continuously, not at fixed resets.",
+    "ITPM is **cache-aware**: `input_tokens` and `cache_creation_input_tokens` count, `cache_read_input_tokens` does **not**. OTPM counts actual generated tokens; `max_tokens` does not factor in, so a high `max_tokens` has no rate-limit downside.",
+    "Monthly spend caps by tier: Start $500, Build $1,000, Scale $200,000. Workspace-level limits can be set lower than the organization's.",
+    "429 responses may include `retry-after` (seconds). Rate limit headers: `anthropic-ratelimit-requests-*`, `-tokens-*`, `-input-tokens-*`, `-output-tokens-*` with `limit`, `remaining` and `reset` (RFC 3339). Token `remaining` values are rounded to the nearest thousand.",
+    "`usage` object: `input_tokens`, `output_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, `cache_creation` (5m/1h breakdown), `output_tokens_details.thinking_tokens`, `server_tool_use` (web search/fetch counts), `service_tier` (`standard`, `priority`, `batch`), `speed`, `inference_geo`.",
+    "`output_tokens` is the inclusive billing total (thinking included). Streaming usage in `message_delta` is cumulative. Total input tokens = `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`.",
+    "Message Batches and Files API have separate limits from the Messages API; token counting also has its own RPM."
+   ],
+   "examTips": [
+    "Caching raises effective throughput because cache reads are excluded from ITPM.",
+    "`input_tokens` alone understates the prompt size when caching is on.",
+    "Use `retry-after` when present; spend-cap 429 has none."
+   ],
+   "source": "https://platform.claude.com/docs/en/api/rate-limits",
+   "example": {
+    "title": "Computing total input from usage",
+    "language": "python",
+    "code": "u = response.usage\ntotal_input = (u.input_tokens\n               + (u.cache_creation_input_tokens or 0)\n               + (u.cache_read_input_tokens or 0))\nitpm_counted = u.input_tokens + (u.cache_creation_input_tokens or 0)  # reads excluded"
+   }
+  }
+ ],
+ "keyTakeaways": [
+  "The Messages API is stateless: resend the full history every call; `system` is a top-level field.",
+  "`model`, `max_tokens` and `messages` are required; `anthropic-version` and content-type headers are required, with `x-api-key` (legacy) or Bearer auth.",
+  "Seven stop_reason values: end_turn, max_tokens, stop_sequence, tool_use, pause_turn, refusal, model_context_window_exceeded; they arrive in 200 responses.",
+  "Streaming order: message_start, content blocks (start/delta/stop), message_delta (stop_reason + cumulative usage), message_stop; tool input arrives as partial JSON.",
+  "Sampling params (temperature/top_p/top_k) are rejected on Claude 4.7+ and API version 2026-10-21; manual `budget_tokens` thinking is legacy (min 1,024, below max_tokens); use adaptive thinking plus effort.",
+  "Batch API: 50 percent cheaper, 100,000 requests or 256 MB, 24h expiry, 29-day results, match by custom_id, no streaming.",
+  "Files API: upload once, reference by file_id; 500 MB per file; uploaded files are not downloadable; files are workspace-scoped.",
+  "Prompt caching: up to 4 breakpoints, 5-minute default TTL (1h option), order tools-system-messages, reads cost a fraction of base input and are excluded from ITPM.",
+  "Total input tokens = input_tokens + cache_creation_input_tokens + cache_read_input_tokens.",
+  "SDKs retry 429/5xx/connection errors twice by default with exponential backoff and honor retry-after; spend-cap 429 has no retry-after.",
+  "Error codes: 400, 401, 402, 403, 404, 409, 413, 429, 500, 504, 529; every response includes a request-id header.",
+  "Token counting is free, an estimate, separately rate limited, and does not accept url/file sources or server tools."
+ ],
+ "glossary": [
+  {
+   "term": "Content block",
+   "definition": "A typed unit of message content (text, image, document, tool_use, tool_result, thinking, etc.)."
+  },
+  {
+   "term": "stop_reason",
+   "definition": "Field explaining why generation ended: end_turn, max_tokens, stop_sequence, tool_use, pause_turn, refusal or model_context_window_exceeded."
+  },
+  {
+   "term": "stop_sequences",
+   "definition": "Custom strings that halt generation; the match is reported in `stop_sequence`."
+  },
+  {
+   "term": "SSE",
+   "definition": "Server-sent events, the streaming transport enabled by `stream: true`."
+  },
+  {
+   "term": "input_json_delta",
+   "definition": "Streaming delta containing a partial JSON string of a tool_use input."
+  },
+  {
+   "term": "cache_control",
+   "definition": "Marker that sets a prompt-cache breakpoint; type `ephemeral` with optional ttl `5m` or `1h`."
+  },
+  {
+   "term": "ITPM / OTPM / RPM",
+   "definition": "Input tokens, output tokens and requests per minute rate limits, enforced with a token bucket."
+  },
+  {
+   "term": "custom_id",
+   "definition": "Unique 1-64 character key identifying each request inside a Message Batch."
+  },
+  {
+   "term": "file_id",
+   "definition": "Identifier returned by the Files API, referenced in image, document or container_upload blocks."
+  },
+  {
+   "term": "Adaptive thinking",
+   "definition": "Thinking mode where the model decides whether and how much to think; depth steered with output_config.effort."
+  },
+  {
+   "term": "budget_tokens",
+   "definition": "Legacy extended-thinking token target (min 1,024, less than max_tokens)."
+  },
+  {
+   "term": "anthropic-version",
+   "definition": "Required header that selects the API version (for example 2026-10-21)."
+  },
+  {
+   "term": "request-id",
+   "definition": "Response header (and error body field) uniquely identifying a request, used for support."
+  },
+  {
+   "term": "pause_turn",
+   "definition": "Stop reason indicating a server-tool loop paused; resend the assistant content to continue."
+  }
+ ],
+ "quiz": [
+  {
+   "q": "A developer's second request to the API ignores everything said in the first turn. The request body only contains the new user question. What is the cause?",
+   "options": [
+    "The `system` prompt was omitted",
+    "The Messages API is stateless, so the full history must be resent in `messages`",
+    "`max_tokens` was set too low",
+    "The `anthropic-version` header was missing"
+   ],
+   "answer": 1,
+   "explanation": "The Messages API does not store conversation state; each request must include all prior turns. The other options would cause errors or truncation, not forgotten context.",
+   "source": "https://platform.claude.com/docs/en/build-with-claude/working-with-messages"
+  },
+  {
+   "q": "A response arrives with HTTP 200, `stop_reason: \"max_tokens\"`, and the last content block is a partially written `tool_use` block. What should the application do?",
+   "options": [
+    "Execute the tool with the partial input",
+    "Treat it as an API error and retry with the same parameters",
+    "Retry with a higher `max_tokens` rather than running the incomplete tool call",
+    "Switch to `stop_sequences`"
+   ],
+   "answer": 2,
+   "explanation": "An incomplete tool_use means truncation; the docs advise retrying with a higher limit. Running partial input is unsafe, and retrying unchanged would truncate again.",
+   "source": "https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons"
+  },
+  {
+   "q": "While streaming, your code reads `stop_reason` from the `message_start` event and always gets null. Where is the final value delivered?",
+   "options": [
+    "`content_block_stop`",
+    "`message_delta`",
+    "`message_stop`",
+    "`ping`"
+   ],
+   "answer": 1,
+   "explanation": "stop_reason is null in message_start and populated in the message_delta event (with cumulative usage). message_stop carries nothing else.",
+   "source": "https://platform.claude.com/docs/en/build-with-claude/streaming"
+  },
+  {
+   "q": "A streamed tool call yields several `input_json_delta` events. When should you parse the JSON for the tool input?",
+   "options": [
+    "After each delta, since each is valid JSON",
+    "After the `content_block_stop` for that block, once fragments are concatenated",
+    "Only after `message_stop`",
+    "Never; the SDK is the only option"
+   ],
+   "answer": 1,
+   "explanation": "Deltas are partial JSON strings. Accumulate them and parse at content_block_stop (or use SDK helpers). They are not individually valid JSON.",
+   "source": "https://platform.claude.com/docs/en/build-with-claude/streaming"
+  },
+  {
+   "q": "After migrating to a Claude 4.7+ model, requests that set `temperature: 0.3` and `thinking: {\"type\":\"enabled\",\"budget_tokens\":8000}` return 400. What is the right fix?",
+   "options": [
+    "Increase `max_tokens`",
+    "Remove the sampling parameter and use `thinking: {\"type\":\"adaptive\"}` with `output_config.effort`",
+    "Add the `anthropic-beta` header",
+    "Lower `budget_tokens` to 1,024"
+   ],
+   "answer": 1,
+   "explanation": "Sampling params are unsupported on 4.7 and later, and `type: enabled` is rejected there; adaptive thinking plus effort replaces budgets. A beta header or a smaller budget does not help.",
+   "source": "https://platform.claude.com/docs/en/build-with-claude/extended-thinking"
+  },
+  {
+   "q": "Using manual extended thinking on a model that supports it, which configuration is valid?",
+   "options": [
+    "max_tokens 4000, budget_tokens 4000",
+    "max_tokens 16000, budget_tokens 512",
+    "max_tokens 16000, budget_tokens 10000",
+    "max_tokens 2000, budget_tokens 8000 with no interleaved thinking"
+   ],
+   "answer": 2,
+   "explanation": "budget_tokens must be at least 1,024 and less than max_tokens (outside the interleaved exception). Only 10,000 under 16,000 satisfies both.",
+   "source": "https://platform.claude.com/docs/en/build-with-claude/extended-thinking"
+  },
+  {
+   "q": "A nightly job summarizes 80,000 documents and nobody needs results before morning. Which approach fits best?",
+   "options": [
+    "Message Batches API with a `custom_id` per document",
+    "Streaming Messages requests in a loop",
+    "Token counting endpoint",
+    "Files API download"
+   ],
+   "answer": 0,
+   "explanation": "Batches give 50 percent savings for asynchronous work (up to 100,000 requests or 256 MB per batch). Streaming is for interactive latency; token counting and file download do not generate output.",
+   "source": "https://platform.claude.com/docs/en/build-with-claude/batch-processing"
+  },
+  {
+   "q": "You downloaded the JSONL results of a batch and the lines are not in the order you submitted. What is the correct way to associate results with inputs?",
+   "options": [
+    "Sort by `message.id`",
+    "Rely on file order",
+    "Match on `custom_id`",
+    "Resubmit with `stream: true`"
+   ],
+   "answer": 2,
+   "explanation": "Batch results may be returned in any order; custom_id is the only reliable key. Streaming is not allowed in batches.",
+   "source": "https://platform.claude.com/docs/en/build-with-claude/batch-processing"
+  },
+  {
+   "q": "A prompt with a cached 200k-token document and a 50-token question returns `input_tokens: 50`, `cache_read_input_tokens: 200000`. How many tokens count toward ITPM?",
+   "options": [
+    "200,050",
+    "50 (plus any cache creation tokens)",
+    "200,000",
+    "0"
+   ],
+   "answer": 1,
+   "explanation": "Cache reads are excluded from ITPM; only input_tokens and cache_creation_input_tokens count. Total prompt size is 200,050 but the limit sees 50.",
+   "source": "https://platform.claude.com/docs/en/api/rate-limits"
+  },
+  {
+   "q": "An engineer puts a `cache_control` breakpoint on a block containing the current timestamp and sees zero cache reads. Why?",
+   "options": [
+    "Timestamps are not allowed in prompts",
+    "The prefix hash changes every request, so no entry matches",
+    "Cache TTL is 1 millisecond",
+    "Breakpoints work only on tools"
+   ],
+   "answer": 1,
+   "explanation": "Matching is exact; per-request content in the prefix changes the hash. Put the breakpoint on the last block that is identical across requests.",
+   "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-caching"
+  },
+  {
+   "q": "Your org hits its tier's monthly spend cap. The SDK keeps retrying and failing. What is going on?",
+   "options": [
+    "The cap returns 429 without a `retry-after` header, so retries fail until access resumes or limits are raised",
+    "The cap returns 529 and should be retried after jitter",
+    "The cap returns 402 which the SDK retries",
+    "The cap returns 400 only when set by you, so it must be a bug"
+   ],
+   "answer": 0,
+   "explanation": "A tier spend-cap 429 has no retry-after and keeps failing; a self-set spend limit returns 400 instead. 529 is overload, 402 is a billing problem.",
+   "source": "https://platform.claude.com/docs/en/api/errors"
+  },
+  {
+   "q": "A user uploads their own PDF through your app, which sends it via the Files API. Later the app tries `GET /v1/files/{id}/content` to give it back. What happens?",
+   "options": [
+    "It works for any file",
+    "It returns 400 because uploaded files are not downloadable",
+    "It returns the file after a beta header is added",
+    "It returns 429"
+   ],
+   "answer": 1,
+   "explanation": "Only files generated by skills or the code execution tool are downloadable; uploaded files have downloadable: false.",
+   "source": "https://platform.claude.com/docs/en/build-with-claude/files"
+  },
+  {
+   "q": "A multi-tenant app stores `file_id` values and accepts them from the client in API calls. What is the main risk?",
+   "options": [
+    "Files expire after 5 minutes",
+    "Files are workspace-scoped, so a user-supplied id could read another tenant's file",
+    "Files cannot be reused",
+    "File IDs are rate limited per user"
+   ],
+   "answer": 1,
+   "explanation": "Any key in the workspace can use any file in it; never accept file IDs from end users and isolate tenants with separate workspaces.",
+   "source": "https://platform.claude.com/docs/en/build-with-claude/files"
+  },
+  {
+   "q": "You want a size estimate for a request that includes an image referenced by URL and a web search tool. What happens on `count_tokens`?",
+   "options": [
+    "It counts normally",
+    "It returns an invalid_request_error because URL image sources and server tools are not accepted",
+    "It bills tokens",
+    "It caches the image"
+   ],
+   "answer": 1,
+   "explanation": "count_tokens rejects server tools, the MCP connector, and image/document blocks with url or file sources; send base64 and client tools only.",
+   "source": "https://platform.claude.com/docs/en/build-with-claude/token-counting"
+  }
+ ]
+}

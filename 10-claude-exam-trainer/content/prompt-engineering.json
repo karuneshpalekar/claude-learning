@@ -1,0 +1,504 @@
+{
+  "slug": "prompt-engineering",
+  "title": "Prompt Engineering",
+  "overview": "Prompt engineering is the practice of improving Claude's output by changing the prompt rather than the model or code. The official guidance starts with success criteria and evals, then layers techniques: clear and direct instructions, context, multishot examples, XML structure, roles via the system prompt, thinking/chain of thought, prompt chaining, and long-context layout. The exam tests which technique fits a given failure, and which older tricks (prefill, budget_tokens, manual CoT) are now deprecated or unsupported on current models.",
+  "sources": [
+    {
+      "title": "Prompt engineering overview",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/overview"
+    },
+    {
+      "title": "Prompting best practices",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices"
+    },
+    {
+      "title": "Define success criteria and build evaluations",
+      "url": "https://platform.claude.com/docs/en/test-and-evaluate/develop-tests"
+    },
+    {
+      "title": "Console prompting tools (generator, templates, improver)",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-tools"
+    },
+    {
+      "title": "Prompt improver",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompt-improver"
+    }
+  ],
+  "sections": [
+    {
+      "heading": "Evals first: success criteria before prompting",
+      "notes": [
+        "The official guide assumes you already have three things: (1) a clear definition of success criteria, (2) a way to empirically test against them, and (3) a first-draft prompt to improve. If not, build those first.",
+        "Good success criteria are **specific, measurable, achievable, and relevant**. 'Classify sentiment well' is bad; 'F1 of at least 0.85 on a held-out test set of 10,000 diverse tweets' is good.",
+        "Common criteria: task fidelity (including edge cases), consistency, relevance/coherence, tone and style, privacy preservation, context utilization, latency, and price. Most use cases need multidimensional evaluation.",
+        "Eval design principles: be task-specific (mirror real distribution, include edge cases like irrelevant, very long, harmful or ambiguous input); automate grading where possible; prioritize volume over quality (many auto-graded cases beat a few hand-graded ones).",
+        "Grading methods: code-based (exact match, string match), human, and LLM-based (Likert scale or binary classification). Example eval types: exact match, cosine similarity, ROUGE-L, LLM Likert, LLM binary. When using an LLM grader, use a different model from the one that produced the output.",
+        "**Not every failing eval is a prompting problem.** For latency and cost, switching to a different model is often easier than rewriting the prompt."
+      ],
+      "example": {
+        "title": "Exact-match eval for a sentiment prompt",
+        "language": "python",
+        "code": "def evaluate_exact_match(model_output, correct_answer):\n    return model_output.strip().lower() == correct_answer.lower()\n\naccuracy = sum(\n    evaluate_exact_match(output, tweet[\"sentiment\"])\n    for output, tweet in zip(outputs, tweets)\n) / len(tweets)\n# Run this before AND after each prompt change to know if the change helped."
+      },
+      "examTips": [
+        "If a scenario has no measurable criteria or test set, the right first step is defining criteria and evals, not editing the prompt.",
+        "Latency or cost complaints: consider a smaller/faster model before heavy prompt engineering.",
+        "Vague criteria ('good', 'works well') are the distractor; measurable ones include a metric and a threshold."
+      ],
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/develop-tests"
+    },
+    {
+      "heading": "Prompt generator, templates and improver (Console)",
+      "notes": [
+        "No first draft? The **prompt generator** in the Claude Console (and the metaprompt recipe in the Claude Cookbook) drafts a prompt template for your task, solving the 'blank page problem'. It works with all Claude models and decides which variables the template needs.",
+        "Console prompt templates use variables (double curly braces such as `{{CUSTOMER_EMAIL}}` — [not verified against a fetched official page; double-check in the Console]) so the same prompt can be tested against many inputs.",
+        "The **prompt improver** refines an existing template in four steps: example identification, initial draft, chain-of-thought refinement, and example enhancement.",
+        "Inputs to the improver: the prompt template to improve (required); feedback on current output problems and example inputs with ideal outputs (optional but recommended). If you lack examples, the Test Case Generator can create sample inputs and responses that you edit.",
+        "Trade-off: improver output tends to be longer, more thorough, and slower. For latency- or cost-sensitive apps, prefer simpler prompts.",
+        "Distinction: generator = create a first draft from a task description; improver = iterate on an existing prompt using feedback and examples."
+      ],
+      "examTips": [
+        "Generator is for a missing first draft; improver is for an existing prompt that produces weak output.",
+        "The improver is best for complex, accuracy-critical tasks, not latency-sensitive ones.",
+        "Neither replaces evals: always measure the generated or improved prompt against your test set."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-tools"
+    },
+    {
+      "heading": "Be clear and direct",
+      "notes": [
+        "Claude responds well to explicit instructions. Think of Claude as a brilliant but new employee with no context on your norms and workflows: the more precisely you explain, the better the result.",
+        "**Golden test:** show your prompt to a colleague with minimal context; if they would be confused, Claude will be too.",
+        "State the output format and constraints. Use numbered lists or bullets when order or completeness of steps matters.",
+        "If you want more than the minimum (extra features, going beyond basics), explicitly ask for it; do not rely on Claude inferring it from a vague request.",
+        "Add context and motivation: explaining **why** a rule exists lets Claude generalize from it. 'Never use ellipses' is weaker than 'this will be read aloud by a text-to-speech engine, which cannot pronounce ellipses'.",
+        "Tell Claude what to do rather than what not to do (for example, ask for 'smoothly flowing prose paragraphs' instead of 'do not use markdown')."
+      ],
+      "example": {
+        "title": "Before and after: vague vs clear and direct",
+        "language": "text",
+        "code": "BEFORE (less effective):\nCreate an analytics dashboard\n\nAFTER (more effective):\nCreate an analytics dashboard. Include as many relevant features and interactions as possible. Go beyond the basics to create a fully-featured implementation.\n\nBEFORE:\nNEVER use ellipses\n\nAFTER:\nYour response will be read aloud by a text-to-speech engine, so never use ellipses since the text-to-speech engine will not know how to pronounce them."
+      },
+      "examTips": [
+        "Best fix for a vague output is more specificity about format, audience and constraints, plus the reason behind constraints.",
+        "Positive framing ('do X') generally beats negative framing ('don't do Y')."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices"
+    },
+    {
+      "heading": "Multishot (few-shot) examples",
+      "notes": [
+        "Examples are one of the most reliable ways to steer output format, tone, and structure. A few well-crafted examples (few-shot or multishot prompting) improve accuracy and consistency.",
+        "Make examples **relevant** (mirror the real use case), **diverse** (cover edge cases and vary enough that Claude does not latch onto unintended patterns), and **structured** (wrap in `<example>` tags, multiple in `<examples>`).",
+        "Aim for roughly 3-5 examples. You can ask Claude to critique your examples for relevance and diversity, or to generate more from your seed set.",
+        "Examples also work with thinking: worked examples shape how Claude reasons in its own thinking blocks. Present each as problem, method to apply, expected answer."
+      ],
+      "example": {
+        "title": "Before and after: adding multishot examples",
+        "language": "text",
+        "code": "BEFORE:\nClassify the support ticket as billing, bug, or feature_request and return JSON.\n\nTicket: {{TICKET}}\n\nAFTER:\nClassify the support ticket as billing, bug, or feature_request. Return only JSON.\n\n<examples>\n<example>\n<ticket>I was charged twice this month.</ticket>\n<output>{\"category\": \"billing\"}</output>\n</example>\n<example>\n<ticket>The export button crashes the app on Safari.</ticket>\n<output>{\"category\": \"bug\"}</output>\n</example>\n<example>\n<ticket>Could you add dark mode?</ticket>\n<output>{\"category\": \"feature_request\"}</output>\n</example>\n</examples>\n\n<ticket>{{TICKET}}</ticket>"
+      },
+      "examTips": [
+        "Inconsistent format or tone: add multishot examples.",
+        "Examples that are all alike cause Claude to copy unintended patterns; diversity matters.",
+        "Tag examples with `<example>`/`<examples>` so they are not confused with instructions."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices"
+    },
+    {
+      "heading": "Chain of thought and thinking",
+      "notes": [
+        "Chain of thought (CoT) means letting Claude reason before answering, which helps with math, logic, analysis, and multistep tasks.",
+        "On current models, the preferred mechanism is the API's **thinking** feature rather than hand-written CoT. Claude 4.6 and later use **adaptive thinking** (`thinking: {type: \"adaptive\"}`), where Claude decides when and how much to think, calibrated by the `effort` parameter and query complexity. Anthropic reports adaptive thinking reliably outperforms extended thinking.",
+        "Older **extended thinking** used `thinking: {type: \"enabled\", budget_tokens: N}`. `budget_tokens` is deprecated on Opus 4.6 and Sonnet 4.6 and returns a **400 error on Claude 4.7 and later**. Migrate budget control to `output_config: {effort: ...}` (or `max_tokens` as a hard cap).",
+        "On Opus 5.5, Fable and Mythos models thinking is always on; on Opus 5, Sonnet 5.5, Sonnet 5 and Haiku 5.5 it is on by default if you omit the `thinking` parameter, so responses may begin with `thinking` blocks. Select content blocks by `type`, not position, and leave room in `max_tokens`.",
+        "Thinking tips: prefer **general instructions** ('think thoroughly') over prescriptive step-by-step plans; multishot examples work inside thinking; ask Claude to **self-check** ('Before you finish, verify your answer against [criteria]') which catches errors in coding and math.",
+        "**Manual CoT fallback** (when thinking is off): ask Claude to think through the problem first and put the final answer in `<answer>` tags so you can extract it. On the newest models, rely on thinking instead; asking the model to write out reasoning, for example in `<thinking>` tags, may be declined.",
+        "Steering: if the model thinks too often, add guidance like 'Thinking adds latency and should only be used when it will meaningfully improve answer quality'. To cut overthinking, tell it to choose an approach and commit, or lower `effort`."
+      ],
+      "example": {
+        "title": "Before and after: extended thinking budget to adaptive thinking",
+        "language": "python",
+        "code": "# Before: extended thinking with a manual budget (older models)\nclient.messages.create(\n    model=\"claude-sonnet-4-5-20250929\",\n    max_tokens=16000,\n    thinking={\"type\": \"enabled\", \"budget_tokens\": 10000},\n    messages=[{\"role\": \"user\", \"content\": \"...\"}],\n)\n\n# After: adaptive thinking with effort\nclient.messages.create(\n    model=\"claude-opus-5-5\",\n    max_tokens=16000,\n    thinking={\"type\": \"adaptive\"},\n    output_config={\"effort\": \"high\"},\n    messages=[{\"role\": \"user\", \"content\": \"...\"}],\n)"
+      },
+      "examTips": [
+        "budget_tokens on Claude 4.7+ = 400 error. Use adaptive thinking + effort.",
+        "Higher effort means more thinking; effort is the main cost/latency dial.",
+        "Do not hand-write a rigid reasoning plan when thinking is available; a general instruction usually beats it.",
+        "Manual CoT with `<answer>` tags is a fallback for thinking-off setups only."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices"
+    },
+    {
+      "heading": "Structure prompts with XML tags",
+      "notes": [
+        "XML tags help Claude parse prompts that mix instructions, context, examples, and variable input, reducing misinterpretation. Wrap each content type in its own tag (`<instructions>`, `<context>`, `<input>`).",
+        "Use **consistent, descriptive** tag names across prompts, and **nest** tags when content is hierarchical (documents inside `<documents>`, each in `<document index=\"n\">`).",
+        "There is no magic set of 'official' tag names; consistency and clarity are the point.",
+        "XML tags also control output: ask Claude to put prose in a named tag, or to place its final answer in `<answer>` so code can parse it. Matching your prompt style to the desired output style (for example, less markdown in the prompt) reduces markdown in the response."
+      ],
+      "example": {
+        "title": "Before and after: unstructured vs XML-structured prompt",
+        "language": "text",
+        "code": "BEFORE:\nSummarize this contract for a non-lawyer. Here is the contract: {{CONTRACT}} Keep it under 150 words and flag risks. The reader is a small business owner.\n\nAFTER:\n<contract>\n{{CONTRACT}}\n</contract>\n\n<instructions>\nSummarize the contract above in under 150 words.\nFlag any risky clauses.\n</instructions>\n\n<audience>A small business owner with no legal training.</audience>\n\nPut the summary in <summary> tags and the risks in <risks> tags."
+      },
+      "examTips": [
+        "Mixed instructions, data and examples that get confused: separate them with XML tags.",
+        "XML is not required syntax; it is a clarity tool. Tag names should be descriptive and consistent."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices"
+    },
+    {
+      "heading": "System prompts and role prompting",
+      "notes": [
+        "Setting a role in the **system prompt** focuses Claude's behavior and tone. Even a single sentence helps, for example 'You are a helpful coding assistant specializing in Python.'",
+        "In the Messages API the system prompt is the top-level `system` parameter (not a message with role system). Put the role and standing rules in `system`; put the task-specific content and variable data in the `user` turn.",
+        "Combine a role with clear instructions, context, and format requirements; the role alone does not replace specific guidance.",
+        "Some models are sensitive to system-prompt wording: overly aggressive language ('CRITICAL: ALWAYS use...') tends to cause overtriggering on newer models. Use targeted instructions such as 'Use [tool] when it would enhance understanding' instead of 'If in doubt, use [tool]'."
+      ],
+      "example": {
+        "title": "Role in the system parameter",
+        "language": "python",
+        "code": "client.messages.create(\n    model=\"claude-opus-5-5\",\n    max_tokens=1024,\n    system=\"You are a helpful coding assistant specializing in Python.\",\n    messages=[{\"role\": \"user\", \"content\": \"How do I sort a list of dictionaries by key?\"}],\n)"
+      },
+      "examTips": [
+        "Role goes in `system`, not a 'system' role message.",
+        "Role prompting tailors tone/focus; it does not grant new capabilities or replace evals."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices"
+    },
+    {
+      "heading": "Long-context prompting",
+      "notes": [
+        "For large inputs (about 20k+ tokens): **put long documents at the top**, above the query, instructions, and examples. Putting the query at the end can improve quality by up to 30% in tests, especially with complex multi-document inputs.",
+        "Structure multiple documents with XML: `<documents>` containing `<document index=\"n\">` with `<source>` and `<document_content>` subtags.",
+        "**Ground responses in quotes**: ask Claude to extract relevant quotes first (in `<quotes>` tags), then perform the task based on those quotes. This cuts through noise in long documents.",
+        "For agentic work spanning multiple context windows, use state files and structured notes; context awareness and compaction help long-horizon tasks."
+      ],
+      "example": {
+        "title": "Multi-document layout with quote grounding",
+        "language": "text",
+        "code": "<documents>\n  <document index=\"1\">\n    <source>annual_report_2023.pdf</source>\n    <document_content>{{ANNUAL_REPORT}}</document_content>\n  </document>\n  <document index=\"2\">\n    <source>competitor_analysis_q2.xlsx</source>\n    <document_content>{{COMPETITOR_ANALYSIS}}</document_content>\n  </document>\n</documents>\n\nFirst find quotes relevant to strategic advantages and place them in <quotes> tags. Then, based on the quotes, recommend Q3 focus areas."
+      },
+      "examTips": [
+        "Documents first, question last.",
+        "Wrong answers on long docs: ask for quotes first, then the answer.",
+        "Use `<source>` metadata so Claude can tell documents apart and cite them."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices"
+    },
+    {
+      "heading": "Prefill: status and migration",
+      "notes": [
+        "Prefill means starting the last assistant message so Claude continues from your text (for example `{` to force JSON).",
+        "**Status:** starting with Claude 4.6 models (and Claude Mythos Preview), prefilled responses on the last assistant turn are **no longer supported** and return a **400 error**. Earlier models still support prefill, and assistant messages elsewhere in the conversation are unaffected.",
+        "Migration: for format control use **structured outputs** (or tools with an enum for classification labels); for removing preambles use a direct instruction ('Respond directly without preamble') or output tags; for bad refusals use clearer user-message prompting; for continuations put the interrupted text in the user message and ask Claude to continue; for context hydration inject reminders into the user turn or via tools/compaction."
+      ],
+      "example": {
+        "title": "Before and after: prefill vs structured instruction",
+        "language": "python",
+        "code": "# BEFORE (works only on older models; 400 error on Claude 4.6+)\nmessages = [\n    {\"role\": \"user\", \"content\": \"Extract name and email as JSON from: ...\"},\n    {\"role\": \"assistant\", \"content\": \"{\"},   # prefill\n]\n\n# AFTER: ask directly, or use structured outputs with a JSON schema\nmessages = [\n    {\"role\": \"user\", \"content\": \"Extract name and email from the text below. Respond with only a JSON object with keys name and email, no preamble.\\n\\n<text>...</text>\"}\n]"
+      },
+      "examTips": [
+        "Prefill on the last assistant turn with a 4.6+ model gives a 400, so the fix is structured outputs or explicit instructions.",
+        "Know the replacement for each use: format -> structured outputs, preamble -> direct instruction, continuation -> user message."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices"
+    },
+    {
+      "heading": "Prompt chaining",
+      "notes": [
+        "Prompt chaining splits a task into sequential API calls, each with a focused prompt, passing outputs forward (ideally in XML tags).",
+        "With adaptive thinking and subagent orchestration Claude handles much multistep reasoning internally, so chaining is no longer needed by default. It is still valuable when you need to **inspect intermediate outputs** or **enforce a specific pipeline structure**.",
+        "The most common pattern is **self-correction**: generate a draft, have Claude review it against criteria, then refine based on the review. Each step is a separate call so you can log, evaluate, or branch at any point.",
+        "Benefits: accuracy (one focused task per step), clarity, traceability for debugging. Cost: more calls and latency."
+      ],
+      "example": {
+        "title": "Self-correction chain (three calls)",
+        "language": "text",
+        "code": "Call 1 (draft):   Write a product description for {{PRODUCT}}.\nCall 2 (review):  <draft>{{DRAFT}}</draft>\n                  Review the draft against these criteria: under 100 words, no superlatives, mentions price. List specific problems in <review> tags.\nCall 3 (refine):  <draft>{{DRAFT}}</draft> <review>{{REVIEW}}</review>\n                  Rewrite the draft fixing every problem in the review."
+      },
+      "examTips": [
+        "Choose chaining when you must inspect or branch on intermediate results; a single call with thinking is fine otherwise.",
+        "Draft -> review -> refine is the canonical chain."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices"
+    },
+    {
+      "heading": "Output control and formatting",
+      "notes": [
+        "Steer format by: telling Claude what to do instead of what not to do; using XML format indicators; matching prompt style to desired output style; and giving detailed formatting guidance when needed.",
+        "For deterministic structure, use **structured outputs** (schema-constrained) or tool calling instead of relying on prose instructions or prefill.",
+        "Length and verbosity differ by model: some default to longer replies, so prompt explicitly for conciseness; some give fewer progress updates in agent work, so ask for them explicitly.",
+        "Model-specific tuning guides exist (for example for Opus 5, Fable 5.1, Haiku 5.5). Treat model-specific advice as measured on that model and re-check with your own evals before applying elsewhere."
+      ],
+      "examTips": [
+        "Hard schema requirement -> structured outputs, not a stronger worded prompt.",
+        "When migrating models, re-run evals: prompts tuned for one model can over- or under-trigger on another (for example over-verification instructions on Opus 5)."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices"
+    }
+  ],
+  "keyTakeaways": [
+    "Define measurable success criteria and evals BEFORE prompt engineering; re-run evals after each change.",
+    "Not every failed eval is a prompt problem; cost and latency are often better fixed by changing the model.",
+    "Be clear, direct and specific; explain why a constraint exists; use the 'colleague with no context' test.",
+    "Multishot: about 3-5 relevant, diverse examples wrapped in <example>/<examples> tags.",
+    "Use consistent, descriptive XML tags to separate instructions, context, examples and input.",
+    "Role goes in the top-level `system` parameter; a one-sentence role already helps.",
+    "Long context: documents at the top, query at the end (up to 30% better); ask for quotes first.",
+    "Prefill on the last assistant turn returns 400 on Claude 4.6+ models; use structured outputs or direct instructions.",
+    "Prefer adaptive thinking (`thinking: {type: \"adaptive\"}`) plus `effort` over `budget_tokens`; budget_tokens errors (400) on Claude 4.7+.",
+    "Manual CoT (`<answer>` tags) is a fallback when thinking is off; general instructions beat prescriptive plans.",
+    "Prompt chaining (draft, review, refine) is for inspecting intermediates or enforcing a pipeline.",
+    "Prompt generator drafts a first prompt; prompt improver refines an existing one in four steps (slower, longer outputs)."
+  ],
+  "glossary": [
+    {
+      "term": "Success criteria",
+      "definition": "Specific, measurable, achievable, relevant targets (for example F1 >= 0.85) used to judge a prompt."
+    },
+    {
+      "term": "Eval",
+      "definition": "A repeatable test set plus grading method (code, human, or LLM) that measures a prompt against success criteria."
+    },
+    {
+      "term": "Multishot / few-shot",
+      "definition": "Including several input/output examples in the prompt to steer format, tone and accuracy."
+    },
+    {
+      "term": "XML tags",
+      "definition": "Descriptive tags like <instructions> or <document> that separate parts of a prompt unambiguously."
+    },
+    {
+      "term": "System prompt",
+      "definition": "The top-level `system` parameter that sets role, tone and standing rules."
+    },
+    {
+      "term": "Role prompting",
+      "definition": "Assigning Claude a persona or expertise in the system prompt to focus behavior."
+    },
+    {
+      "term": "Chain of thought (CoT)",
+      "definition": "Having Claude reason step by step before answering; now usually done via thinking."
+    },
+    {
+      "term": "Adaptive thinking",
+      "definition": "`thinking: {type: \"adaptive\"}`; Claude decides when and how much to think, guided by `effort`."
+    },
+    {
+      "term": "Extended thinking / budget_tokens",
+      "definition": "Older manual thinking mode with a token budget; deprecated and a 400 error on Claude 4.7+."
+    },
+    {
+      "term": "effort",
+      "definition": "`output_config.effort` setting controlling how much thinking and token use the model applies."
+    },
+    {
+      "term": "Prefill",
+      "definition": "Starting the final assistant message for Claude to continue; unsupported (400) on Claude 4.6+ models."
+    },
+    {
+      "term": "Structured outputs",
+      "definition": "Schema-constrained responses; the recommended replacement for prefill-based format control."
+    },
+    {
+      "term": "Prompt chaining",
+      "definition": "Splitting a task across sequential API calls, passing outputs forward."
+    },
+    {
+      "term": "Prompt generator",
+      "definition": "Console tool that drafts a first prompt template for a task."
+    },
+    {
+      "term": "Prompt improver",
+      "definition": "Console tool that refines a template via example identification, initial draft, CoT refinement and example enhancement."
+    },
+    {
+      "term": "Quote grounding",
+      "definition": "Asking Claude to extract relevant quotes from long documents before answering."
+    }
+  ],
+  "quiz": [
+    {
+      "q": "A team's support-classification prompt gives inconsistent outputs, and they have no test set or definition of 'good'. What should they do first?",
+      "options": [
+        "Add more adjectives to the prompt to stress accuracy",
+        "Define measurable success criteria and build an eval set, then iterate on the prompt",
+        "Switch to the largest available model",
+        "Add a prefilled assistant message"
+      ],
+      "answer": 1,
+      "explanation": "The official guide assumes criteria, a way to test, and a first draft. Without criteria and evals you cannot tell whether any change helps. The other options are guesses without measurement, and prefill is unsupported on newer models.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/overview"
+    },
+    {
+      "q": "Which success criterion best matches the guidance on good criteria?",
+      "options": [
+        "The model should classify sentiment well",
+        "F1 of at least 0.85 on a held-out set of 10,000 diverse tweets",
+        "Users should feel the answers are good",
+        "The model should be as accurate as possible"
+      ],
+      "answer": 1,
+      "explanation": "Good criteria are specific and measurable with a metric and threshold. The others are vague and cannot be tested.",
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/develop-tests"
+    },
+    {
+      "q": "An app's main complaint is high latency and cost, while answer quality passes evals. What is the most appropriate lever according to the guide?",
+      "options": [
+        "Add a long role description",
+        "Consider a different (smaller/faster) model",
+        "Add ten more few-shot examples",
+        "Chain five prompts together"
+      ],
+      "answer": 1,
+      "explanation": "Not every criterion is best solved by prompt engineering; latency and cost can often be improved more easily by choosing a different model. Extra examples or chaining typically increase tokens and latency.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/overview"
+    },
+    {
+      "q": "Claude keeps outputting a reply format that differs from your required style and tone. Which technique is the most reliable fix?",
+      "options": [
+        "Add 3-5 relevant, diverse examples wrapped in <example> tags",
+        "Write the instruction in capital letters",
+        "Add a prefilled assistant turn",
+        "Reduce max_tokens"
+      ],
+      "answer": 0,
+      "explanation": "Examples are among the most reliable ways to steer format, tone and structure. Shouting is not reliable, prefill is unsupported on 4.6+ models, and max_tokens only truncates.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices"
+    },
+    {
+      "q": "Your few-shot examples are all very similar and Claude begins copying an incidental pattern in them. What is the best correction?",
+      "options": [
+        "Remove all examples",
+        "Make examples more diverse and cover edge cases",
+        "Use only one example",
+        "Move the examples after the question"
+      ],
+      "answer": 1,
+      "explanation": "Examples should be relevant and diverse so Claude does not pick up unintended patterns.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices"
+    },
+    {
+      "q": "A prompt mixes instructions, a pasted contract, and sample outputs in one paragraph, and Claude sometimes treats the contract text as instructions. What helps most?",
+      "options": [
+        "Wrap each content type in consistent, descriptive XML tags",
+        "Lower the temperature to 0",
+        "Put the contract in the system prompt in uppercase",
+        "Add 'be careful' at the end"
+      ],
+      "answer": 0,
+      "explanation": "XML tags let Claude parse mixed content unambiguously. The other options do not separate data from instructions.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices"
+    },
+    {
+      "q": "You analyze five long reports (60k tokens total) and answers are mediocre. Which layout follows the guidance?",
+      "options": [
+        "Question first, then the documents",
+        "Documents at the top inside <document> tags with <source>, question at the end, and ask Claude to quote relevant passages first",
+        "Split documents randomly between system and user messages",
+        "Summarize each report to one sentence before asking"
+      ],
+      "answer": 1,
+      "explanation": "Put long data at the top, structure with XML metadata, put the query at the end (up to 30% better), and ground answers in extracted quotes.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices"
+    },
+    {
+      "q": "A developer upgrades to a Claude 4.6+ model and starts getting 400 errors. The request ends with an assistant message containing '{' to force JSON. What is the recommended fix?",
+      "options": [
+        "Add a second assistant message",
+        "Use structured outputs or instruct the model directly to return only JSON",
+        "Lower the effort parameter",
+        "Wrap the brace in XML tags"
+      ],
+      "answer": 1,
+      "explanation": "Prefill on the last assistant turn is unsupported on Claude 4.6+ and returns 400. Structured outputs (or a clear instruction/tools with enum) replace it.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices"
+    },
+    {
+      "q": "A request sets thinking={'type':'enabled','budget_tokens':10000} on a Claude 4.7-or-later model. What happens and what is the right migration?",
+      "options": [
+        "It works but is slower",
+        "It returns a 400 error; use thinking type adaptive and control depth with output_config effort",
+        "It is silently ignored",
+        "It switches to prefill mode"
+      ],
+      "answer": 1,
+      "explanation": "budget_tokens is deprecated on Opus/Sonnet 4.6 and errors with 400 on 4.7+. Use adaptive thinking and the effort parameter (max_tokens as a hard ceiling).",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices"
+    },
+    {
+      "q": "Thinking is off and you want step-by-step reasoning whose final result your code can extract. Which approach matches the guide's fallback?",
+      "options": [
+        "Ask Claude to reason first and place the final answer in <answer> tags",
+        "Prefill with 'Step 1:'",
+        "Set temperature to 1",
+        "Ask Claude to answer in one word"
+      ],
+      "answer": 0,
+      "explanation": "Manual CoT with an <answer> tag is the documented fallback; prefill is unsupported on newer models and the others do not elicit or extract reasoning.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices"
+    },
+    {
+      "q": "Your thinking-enabled model seems to think on trivial queries, adding latency. What is a documented way to steer it?",
+      "options": [
+        "Add guidance that thinking adds latency and should be used only when it meaningfully improves quality, or lower effort",
+        "Remove the system prompt",
+        "Set budget_tokens to 1",
+        "Add 'think harder' to every prompt"
+      ],
+      "answer": 0,
+      "explanation": "Adaptive thinking triggering is promptable, and effort is the main dial. budget_tokens errors on newer models and 'think harder' increases thinking.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices"
+    },
+    {
+      "q": "A pipeline must let engineers inspect Claude's draft, grade it against criteria, then refine it, logging each step. Which design fits?",
+      "options": [
+        "One large prompt with all steps and no intermediate output",
+        "Prompt chaining: draft call, review call, refine call",
+        "Prefill the review",
+        "Increase max_tokens"
+      ],
+      "answer": 1,
+      "explanation": "Chaining is still valuable when you need to inspect intermediate outputs or enforce a pipeline; draft-review-refine is the common self-correction pattern.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices"
+    },
+    {
+      "q": "You have an existing Console prompt template that produces weak output on a complex, accuracy-critical task, and you have a few ideal examples. Which tool is most appropriate?",
+      "options": [
+        "Prompt generator, to create a brand-new first draft",
+        "Prompt improver, supplying the template, feedback and example outputs",
+        "Prefill",
+        "Batch API"
+      ],
+      "answer": 1,
+      "explanation": "The improver refines an existing template (example identification, draft, CoT refinement, example enhancement) and benefits from feedback and examples. The generator is for a missing first draft.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-tools"
+    },
+    {
+      "q": "Where should a role like 'You are a helpful coding assistant specializing in Python' be placed in a Messages API request?",
+      "options": [
+        "In the top-level system parameter",
+        "As the last assistant message",
+        "In a message with role 'system' inside messages",
+        "Appended to max_tokens"
+      ],
+      "answer": 0,
+      "explanation": "The role belongs in the system prompt via the `system` parameter; the messages array holds user/assistant turns.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices"
+    },
+    {
+      "q": "You want Claude to avoid markdown in replies. Which phrasing follows the guidance?",
+      "options": [
+        "Do not use markdown",
+        "Your response should be composed of smoothly flowing prose paragraphs",
+        "NEVER USE MARKDOWN!!!",
+        "Respond in JSON"
+      ],
+      "answer": 1,
+      "explanation": "Tell Claude what to do instead of what not to do; matching prompt style to desired output also helps.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices"
+    }
+  ]
+}

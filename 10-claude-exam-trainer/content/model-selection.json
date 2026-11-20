@@ -1,0 +1,352 @@
+{
+  "slug": "model-selection",
+  "title": "Model Selection",
+  "overview": "This objective covers the current Claude model families (Fable, Opus, Sonnet, Haiku), their API IDs, how aliases differ from pinned snapshots, and how to compare models on context, output, price, latency and features. It also covers choosing a model per use case, the model lifecycle (active, legacy, deprecated, retired), platform availability and migrating between generations. The exam tests whether you can justify a model choice from requirements, avoid retired or deprecated IDs, and spot migration breaking changes.",
+  "sources": [
+    {"title": "Models overview", "url": "https://platform.claude.com/docs/en/models/overview"},
+    {"title": "Choosing the right model", "url": "https://platform.claude.com/docs/en/about-claude/models/choosing-a-model"},
+    {"title": "Model IDs and versioning", "url": "https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions"},
+    {"title": "Model deprecations", "url": "https://platform.claude.com/docs/en/about-claude/model-deprecations"},
+    {"title": "Migration guides", "url": "https://platform.claude.com/docs/en/about-claude/models/migration-guide"},
+    {"title": "What's new in Claude Sonnet 5.5", "url": "https://platform.claude.com/docs/en/models/sonnet-5-5/whats-new-sonnet-5-5"}
+  ],
+  "sections": [
+    {
+      "heading": "The current model lineup",
+      "notes": [
+        "The current generation has four tiers: **Claude Fable 5.1** (`claude-fable-5-1`, demanding reasoning and long-horizon agentic work), **Claude Opus 5.5** (`claude-opus-5-5`, long-running agentic coding and knowledge work), **Claude Sonnet 5.5** (`claude-sonnet-5-5`, best combination of speed and intelligence) and **Claude Haiku 5.5** (`claude-haiku-5-5`, high-volume, latency-sensitive work such as classification, extraction and routing).",
+        "**Claude Mythos 5.1** (`claude-mythos-5-1`) has the same capabilities as Fable 5.1 but is offered only to organizations verified through Anthropic's verification programs (for example the Cyber Verification Program).",
+        "All current models accept text and image input, produce text output, and support multilingual use, vision and tool use.",
+        "Legacy but still available: Fable 5, Opus 5, Opus 4.8, 4.7, 4.6, 4.5, Sonnet 5, Sonnet 4.6, Haiku 4.5.",
+        "Docs guidance: start with Opus 5.5 for most workloads; move to Fable 5.1 when evals on Opus 5.5 at higher effort still fall short."
+      ],
+      "example": {
+        "title": "Calling the current tiers",
+        "language": "python",
+        "code": "import anthropic\nclient = anthropic.Anthropic()\n\nMODELS = {\n    \"frontier\": \"claude-fable-5-1\",\n    \"flagship\": \"claude-opus-5-5\",\n    \"balanced\": \"claude-sonnet-5-5\",\n    \"fast\": \"claude-haiku-5-5\",\n}\n\nmsg = client.messages.create(\n    model=MODELS[\"balanced\"],\n    max_tokens=1024,\n    messages=[{\"role\": \"user\", \"content\": \"Summarize this ticket in one line.\"}],\n)\nprint(msg.content[0].text)"
+      },
+      "examTips": [
+        "Know the tier-to-purpose mapping: Haiku = speed/cost, Sonnet = balance, Opus = agentic coding/knowledge work, Fable = highest capability.",
+        "Mythos 5.1 is gated by verification; Fable 5.1 is the most capable model open to all customers."
+      ],
+      "source": "https://platform.claude.com/docs/en/models/overview"
+    },
+    {
+      "heading": "Model comparison: context, output, price, latency",
+      "notes": [
+        "**Context window:** 1M tokens on all four current models. **Max output:** 128K tokens (synchronous Messages API). On the Batches API, Opus 5.5, Sonnet 5.5 and Haiku 5.5 (and several earlier models) can reach 300k output tokens with the `output-300k-2026-03-24` beta header.",
+        "**Pricing (per million tokens, input / output):** Fable 5.1 $10 / $50; Opus 5.5 $4 / $20; Sonnet 5.5 $2 / $10; Haiku 5.5 from $0.10 / from $0.50.",
+        "**Comparative latency:** Fable slower, Opus moderate, Sonnet fast, Haiku fastest.",
+        "**Thinking:** adaptive thinking on all four (always on for Fable 5.1 and Opus 5.5). Default effort is `high` for Fable 5.1 and Sonnet 5.5, `medium` for Opus 5.5 and Haiku 5.5.",
+        "Batch API requests are 50% off. Prompt cache reads cost 10% of base input price in general (2.5% on Fable 5.1 and Mythos 5.1; 5% on Opus 5.5 and Sonnet 5.5).",
+        "Reliable knowledge cutoff for all four is June 2026.",
+        "The Models API (`/v1/models`) returns `max_input_tokens`, `max_tokens` and a `capabilities` object per model, so capabilities can be queried programmatically."
+      ],
+      "example": {
+        "title": "Query capabilities programmatically",
+        "language": "python",
+        "code": "import anthropic\nclient = anthropic.Anthropic()\n\nfor m in client.models.list():\n    print(m.id)\n# The response also carries max_input_tokens, max_tokens and capabilities for each model."
+      },
+      "examTips": [
+        "Do not assume bigger context for bigger models: all current tiers share 1M context and 128K output; price and latency are what differ.",
+        "Effort is often a better lever than switching models: it trades intelligence for latency and cost inside one model."
+      ],
+      "source": "https://platform.claude.com/docs/en/models/overview"
+    },
+    {
+      "heading": "Aliases vs snapshots and model ID format",
+      "notes": [
+        "Every Claude model ID identifies a **pinned version**. Anthropic does not change the weights or configuration of an existing ID; updates ship under a new ID.",
+        "From the 4.6 generation onward IDs are **dateless**: `claude-{name}-{major}[-{minor}]` (for example `claude-sonnet-4-6`, `claude-opus-5`, `claude-sonnet-5-5`). Major releases omit the minor segment.",
+        "Before 4.6, IDs carry a snapshot date: `claude-sonnet-4-5-20250929`, `claude-haiku-4-5-20251001`. On the Claude API these also have shorter **aliases** (such as `claude-sonnet-4-5`) that point to the latest dated snapshot for that minor version.",
+        "A dateless 4.6+ ID is **not** an evergreen alias; it is itself the snapshot. Misreading it as a moving pointer is a common misconception.",
+        "Model weights are fixed per ID, but serving infrastructure (router, safety classifiers, sampling logic) can change and occasionally cause minor behavior differences.",
+        "Every model ID, dated or dateless, has its own deprecation and retirement schedule.",
+        "Platform formats differ: Bedrock uses `anthropic.claude-sonnet-5-5` (older: `anthropic.claude-sonnet-4-5-20250929-v1:0`); Google managed older IDs use `@` before the date (`claude-haiku-4-5@20251001`)."
+      ],
+      "example": {
+        "title": "ID formats side by side",
+        "language": "text",
+        "code": "Claude API (current)      claude-sonnet-5-5\nClaude API (pre-4.6 snap) claude-sonnet-4-5-20250929\nClaude API (pre-4.6 alias) claude-sonnet-4-5   -> latest dated snapshot\nAmazon Bedrock (current)  anthropic.claude-sonnet-5-5\nBedrock (pre-4.6)         anthropic.claude-sonnet-4-5-20250929-v1:0\nGoogle managed (pre-4.6)  claude-haiku-4-5@20251001"
+      },
+      "examTips": [
+        "For reproducible production behavior, use a pinned ID (snapshot or dateless 4.6+ ID), never rely on an alias that can be re-pointed.",
+        "If behavior shifts on an unchanged ID, infrastructure updates are the most likely cause, not new weights."
+      ],
+      "source": "https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions"
+    },
+    {
+      "heading": "Choosing a starting point: efficiency-first vs capability-first",
+      "notes": [
+        "Criteria to weigh: **capabilities**, **speed**, **cost** and **effort**. Fast mode can give up to 2.5x output speed at premium pricing on supported models.",
+        "**Efficiency-first:** start with Haiku 5.5, test, and upgrade only for specific capability gaps. Best for prototyping, tight latency, cost-sensitive and high-volume simple tasks.",
+        "**Capability-first:** start with Opus 5.5, optimize prompts, then lower effort or move to a cheaper model as the workflow matures. If evals at `xhigh` or `max` effort still fall short, move to Fable 5.1.",
+        "The most important step is building benchmark tests specific to your use case and running them with your real prompts and data, comparing accuracy, quality and edge-case handling against cost."
+      ],
+      "example": {
+        "title": "A tiny eval loop for model choice",
+        "language": "python",
+        "code": "import anthropic\nclient = anthropic.Anthropic()\ncases = [(\"Refund request for order 123\", \"billing\"), (\"App crashes on login\", \"bug\")]\n\ndef score(model):\n    ok = 0\n    for text, label in cases:\n        r = client.messages.create(\n            model=model, max_tokens=20,\n            messages=[{\"role\": \"user\", \"content\": f\"Classify as billing or bug. Reply with one word.\\n{text}\"}],\n        )\n        ok += r.content[-1].text.strip().lower() == label\n    return ok / len(cases)\n\nfor m in [\"claude-haiku-5-5\", \"claude-sonnet-5-5\"]:\n    print(m, score(m))"
+      },
+      "examTips": [
+        "Pick by evals on your own data, not by assuming the biggest model is needed.",
+        "Tuning effort is often preferable to switching models."
+      ],
+      "source": "https://platform.claude.com/docs/en/about-claude/models/choosing-a-model"
+    },
+    {
+      "heading": "Model selection matrix by use case",
+      "notes": [
+        "**Highest capability:** Fable 5.1 for hours-long agent sessions, multistep deep research, analysis carried through to finished documents, spreadsheets or decks.",
+        "**Complex agentic coding and enterprise work:** Opus 5.5 for multihour autonomous coding agents, large refactors, complex systems engineering, vision-heavy workflows and computer use.",
+        "**Everyday coding, agents, enterprise workloads:** Sonnet 5.5 for code generation, data analysis, content creation, visual understanding, agentic tool use.",
+        "**Lowest latency and price:** Haiku 5.5 for real-time apps, high-volume processing, cost-sensitive deployments and subagent tasks.",
+        "**Combine models:** pair a cheap model with a frontier one, either an executor that escalates hard decisions to an advisor, or an orchestrator that delegates bulk work to low-cost workers."
+      ],
+      "example": {
+        "title": "Simple router by task type",
+        "language": "python",
+        "code": "def pick_model(task):\n    if task in {\"classify\", \"extract\", \"route\"}:\n        return \"claude-haiku-5-5\"\n    if task in {\"code\", \"analysis\", \"content\"}:\n        return \"claude-sonnet-5-5\"\n    if task in {\"agentic_coding\", \"computer_use\"}:\n        return \"claude-opus-5-5\"\n    return \"claude-fable-5-1\"  # long-horizon research / hardest reasoning"
+      },
+      "examTips": [
+        "Subagent / bulk workers map to Haiku; the orchestrator or advisor maps to a stronger model.",
+        "A real-time, latency-bound classifier is a Haiku scenario, not Opus."
+      ],
+      "source": "https://platform.claude.com/docs/en/about-claude/models/choosing-a-model"
+    },
+    {
+      "heading": "Thinking and effort as model-level knobs",
+      "notes": [
+        "Current models use **adaptive thinking**: the model decides how much to think, steered by the `effort` parameter. The older manual `thinking.type: enabled` with `budget_tokens` is deprecated on Opus 4.6 and Sonnet 4.6 and not accepted on later models.",
+        "Defaults differ per model (see comparison). Set effort explicitly to use a different level. Effort levels are recalibrated per model, so re-run your effort sweep after switching rather than copying a setting.",
+        "On Sonnet 5.5, `thinking: {\"type\": \"disabled\"}` returns a 400; use `{\"type\": \"between_tools\"}` (allowed at `low`, `medium`, `high` effort) to turn off up-front thinking.",
+        "Opus 5.5 and Fable 5.1 have adaptive thinking always on. Opus 4.8 and 4.7 use `xhigh` effort as the best setting for most coding and agentic use."
+      ],
+      "example": {
+        "title": "Turning off up-front thinking on Sonnet 5.5",
+        "language": "json",
+        "code": "{\n  \"model\": \"claude-sonnet-5-5\",\n  \"max_tokens\": 1024,\n  \"thinking\": {\"type\": \"between_tools\"},\n  \"output_config\": {\"effort\": \"medium\"},\n  \"messages\": [{\"role\": \"user\", \"content\": \"Hello\"}]\n}"
+      },
+      "examTips": [
+        "`disabled` thinking fails on Sonnet 5.5 (use `between_tools`); `between_tools` with `xhigh` or `max` effort also fails.",
+        "`temperature`, `top_p` and `top_k` are removed in API version 2026-10-21 (400 error); earlier versions reject non-default values on Claude 4.7+ models."
+      ],
+      "source": "https://platform.claude.com/docs/en/models/sonnet-5-5/whats-new-sonnet-5-5"
+    },
+    {
+      "heading": "Model lifecycle and deprecations",
+      "notes": [
+        "Lifecycle states: **Active** (fully supported), **Legacy** (no more updates, may be deprecated later), **Deprecated** (works but not recommended; replacement and retirement date assigned), **Retired** (requests fail).",
+        "Anthropic gives at least **60 days' notice** before retiring publicly released models, by email and in the docs. Active models list a tentative 'not sooner than' retirement date.",
+        "Examples from the status table: `claude-sonnet-4-5-20250929` is Deprecated (announced Sept 30, 2026) and retires Nov 30, 2026, replacement `claude-sonnet-5-5`; `claude-opus-4-5-20251101` is Active, not sooner than Nov 24, 2026; `claude-haiku-4-5-20251001` is Active, not sooner than Oct 15, 2026; Opus 4.1, Opus 4, Sonnet 4, Sonnet 3.7, Haiku 3.5 and Haiku 3 are Retired.",
+        "To find deprecated usage: Console Usage page, **Export**, and review the CSV broken down by API key and model.",
+        "Dates on the deprecations page apply to Anthropic-operated platforms (Claude API, Claude Platform on AWS, Google Cloud Anthropic managed, Microsoft Foundry). **Amazon Bedrock and Google Cloud (Google managed) set their own schedules.**",
+        "Parameters can also be deprecated: `temperature`, `top_p`, `top_k` were removed in API version 2026-10-21."
+      ],
+      "example": {
+        "title": "Guarding against retired IDs in config",
+        "language": "python",
+        "code": "DEPRECATED_REPLACEMENTS = {\n    \"claude-sonnet-4-5-20250929\": \"claude-sonnet-5-5\",\n    \"claude-opus-4-1-20250805\": \"claude-opus-4-8\",\n    \"claude-3-haiku-20240307\": \"claude-haiku-4-5-20251001\",\n}\n\ndef resolve(model_id):\n    if model_id in DEPRECATED_REPLACEMENTS:\n        print(f\"warning: {model_id} deprecated/retired, use {DEPRECATED_REPLACEMENTS[model_id]}\")\n    return model_id"
+      },
+      "examTips": [
+        "Deprecated is not retired: deprecated models still work until the retirement date; retired models fail.",
+        "Do not assume Bedrock or Google managed dates match the Claude API dates."
+      ],
+      "source": "https://platform.claude.com/docs/en/about-claude/model-deprecations"
+    },
+    {
+      "heading": "Platform availability",
+      "notes": [
+        "Current models are available on the **Claude API**, **Amazon Bedrock**, **Claude Platform on AWS**, **Claude Models on Google Cloud** (both Anthropic managed and Google managed) and **Microsoft Foundry**.",
+        "IDs: Claude API, Google Cloud (both), Foundry and Claude Platform on AWS use the Claude API ID (for example `claude-sonnet-5-5`). Bedrock uses `anthropic.claude-sonnet-5-5`.",
+        "Foundry deployments default to the Claude API model ID; the deployment name is what you send. Foundry follows the Claude API lifecycle schedule; Claude Platform on AWS follows Anthropic's first-party lifecycle.",
+        "Bedrock and Google (Google managed) offer global endpoints (dynamic routing) and regional endpoints (guaranteed data routing), and set their own lifecycle dates.",
+        "Some features differ by platform: for example on Sonnet 5.5, the `computer_20251124` tool still works on Bedrock with a beta header but gets a 400 on the Claude API. Each model page lists its platforms."
+      ],
+      "example": {
+        "title": "Same model, different platform IDs",
+        "language": "text",
+        "code": "Claude API / Google Cloud / Foundry / Platform on AWS: claude-opus-5-5\nAmazon Bedrock:                                         anthropic.claude-opus-5-5"
+      },
+      "examTips": [
+        "Check the ID format for the platform; a Bedrock ID will not work on the Claude API and vice versa.",
+        "Retirement commitments in the overview apply to Anthropic-operated platforms only."
+      ],
+      "source": "https://platform.claude.com/docs/en/models/overview"
+    },
+    {
+      "heading": "Migrating between models",
+      "notes": [
+        "Migration guides exist for Fable 5.1 / Mythos 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5. Start by changing the model ID, then work through the checklist of breaking changes, and re-run evals.",
+        "Sonnet 5.5 breaking changes vs Sonnet 5: `disabled` thinking returns 400 (use `between_tools`); forced tool use (`tool_choice` `any` or `tool`) returns 400; thinking blocks are bound to the model and conversation; `computer_20251124` is unsupported on the Claude API (use `computer_toolset_20260801`); some advisor pairings are rejected.",
+        "Opus 5.5 similarly needs attention if you force tool use, turn thinking off or use `computer_20251124`.",
+        "Replace forced tool use with `tool_choice: auto` plus `strict: true` strict tool use or structured outputs, and tell the model in the prompt when to call the tool.",
+        "Keep conversations append-only: replaying a thinking block after editing earlier history can return a 400 on newer accounts. Switching models mid-conversation drops thinking blocks the target cannot read (request still succeeds, dropped blocks are not billed).",
+        "Text between tool calls may come back in `thinking` blocks; with default `display: omitted` a streaming UI goes quiet unless you set `display` or use `between_tools`.",
+        "Effort levels are recalibrated, so re-run your effort sweep. Deprecated replacements recommended on the deprecations page: Sonnet 4.x/3.x to `claude-sonnet-5-5`, Opus 4/4.1/3 to `claude-opus-4-8`, Haiku 3/3.5 to `claude-haiku-4-5-20251001`."
+      ],
+      "example": {
+        "title": "Migrating a forced-tool call to Sonnet 5.5",
+        "language": "python",
+        "code": "# Before (returns 400 on claude-sonnet-5-5)\nclient.messages.create(\n    model=\"claude-sonnet-5\", max_tokens=1024, tools=tools,\n    tool_choice={\"type\": \"tool\", \"name\": \"get_weather\"},\n    messages=msgs)\n\n# After\ntools = [{**t, \"strict\": True} for t in tools]\nclient.messages.create(\n    model=\"claude-sonnet-5-5\", max_tokens=1024, tools=tools,\n    tool_choice={\"type\": \"auto\"},\n    system=\"Use the get_weather tool for any weather question.\",\n    messages=msgs)"
+      },
+      "examTips": [
+        "Changing only the model string is rarely enough; check thinking, tool_choice, computer-use tool versions and sampling parameters.",
+        "A migration that 'succeeds' can still change behavior (effort calibration, text in thinking blocks), so re-run evals."
+      ],
+      "source": "https://platform.claude.com/docs/en/models/sonnet-5-5/whats-new-sonnet-5-5"
+    },
+    {
+      "heading": "Cost optimization across models",
+      "notes": [
+        "Batch API gives 50% off for non-interactive workloads; prompt caching cuts repeated input cost (cache reads are a fraction of base input price).",
+        "Use cheap models for the bulk of tokens (orchestrator/worker or executor/advisor patterns) and reserve frontier models for hard decisions.",
+        "The advisor tool (beta) lets an executor model consult a stronger advisor; pairings are restricted, for example a Sonnet 5.5 executor accepts Mythos 5.1, Fable 5.1, Opus 5.5, Opus 5 or Sonnet 5.5 as advisor.",
+        "Lowering effort is usually the first cost and latency lever before changing tiers."
+      ],
+      "example": {
+        "title": "Orchestrator with Haiku workers (sketch)",
+        "language": "python",
+        "code": "plan = client.messages.create(model=\"claude-opus-5-5\", max_tokens=800,\n    messages=[{\"role\": \"user\", \"content\": \"Split this report task into 5 independent subtasks.\"}])\n# fan out cheap workers\nfor sub in subtasks:\n    client.messages.create(model=\"claude-haiku-5-5\", max_tokens=500,\n        messages=[{\"role\": \"user\", \"content\": sub}])"
+      },
+      "examTips": [
+        "When a scenario stresses high volume plus cost, think Haiku, Batch API and caching before a bigger model.",
+        "Advisor pairing with an unsupported model returns 400."
+      ],
+      "source": "https://platform.claude.com/docs/en/about-claude/models/choosing-a-model"
+    }
+  ],
+  "keyTakeaways": [
+    "Current tiers: Fable 5.1 (most capable), Opus 5.5, Sonnet 5.5, Haiku 5.5, with IDs claude-fable-5-1, claude-opus-5-5, claude-sonnet-5-5, claude-haiku-5-5.",
+    "All four current models have a 1M-token context window and 128K max output; they differ in price, latency and capability.",
+    "Pricing per MTok (in/out): Fable $10/$50, Opus $4/$20, Sonnet $2/$10, Haiku from $0.10/$0.50.",
+    "Every model ID is a pinned snapshot; 4.6+ dateless IDs are not evergreen aliases.",
+    "Pre-4.6 models have dated IDs plus convenience aliases on the Claude API that resolve to the latest dated snapshot.",
+    "Start efficiency-first with Haiku or capability-first with Opus; escalate to Fable 5.1 if evals at xhigh/max effort fall short.",
+    "Build use-case-specific evals; tuning effort is often better than switching models.",
+    "Lifecycle: Active, Legacy, Deprecated, Retired; at least 60 days' notice before retiring public models.",
+    "Bedrock and Google (Google managed) set their own retirement dates; Anthropic's dates cover Claude API, Platform on AWS, Google Anthropic managed and Foundry.",
+    "Sonnet 5.5: `disabled` thinking and forced tool_choice (`any`/`tool`) return 400; use `between_tools` and `auto` plus strict tool use.",
+    "Bedrock IDs are prefixed `anthropic.`; other platforms mostly use the Claude API ID.",
+    "Audit deprecated usage via Console Usage page export (CSV by API key and model)."
+  ],
+  "glossary": [
+    {"term": "Snapshot", "definition": "A fixed, pinned model version identified by a model ID; weights and configuration never change under that ID."},
+    {"term": "Alias", "definition": "A convenience ID on the Claude API for pre-4.6 models (e.g. claude-sonnet-4-5) that resolves to the latest dated snapshot."},
+    {"term": "Dateless ID", "definition": "The ID format from the 4.6 generation on (claude-name-major[-minor]); it is itself a pinned snapshot, not an alias."},
+    {"term": "Adaptive thinking", "definition": "Mode where the model decides how much to think, steered by the effort parameter; replaces manual budget_tokens thinking."},
+    {"term": "Effort", "definition": "Parameter (low to max, including xhigh on some models) that trades intelligence for latency and cost within a model."},
+    {"term": "between_tools", "definition": "Thinking setting on Sonnet 5.5 that turns off up-front thinking while keeping brief progress updates between tool calls."},
+    {"term": "Active / Legacy / Deprecated / Retired", "definition": "The four model lifecycle states; retired models fail requests."},
+    {"term": "Models API", "definition": "Endpoint that lists available models with max_input_tokens, max_tokens and capabilities."},
+    {"term": "Mythos 5.1", "definition": "Fable 5.1-equivalent model available only to organizations verified via Anthropic's verification programs."},
+    {"term": "Fast mode", "definition": "Option on supported models giving up to 2.5x higher output speed at premium pricing."}
+  ],
+  "quiz": [
+    {
+      "q": "A team runs a real-time support-ticket router that classifies millions of short messages per day. Latency and cost matter most and accuracy on a pilot eval is acceptable. Which model should they use?",
+      "options": ["claude-fable-5-1", "claude-opus-5-5", "claude-haiku-5-5", "claude-sonnet-4-5-20250929"],
+      "answer": 2,
+      "explanation": "Haiku 5.5 is the fastest, cheapest tier, intended for classification, extraction and routing. Fable and Opus add cost and latency without need. Sonnet 4.5 is deprecated.",
+      "source": "https://platform.claude.com/docs/en/models/overview"
+    },
+    {
+      "q": "A developer assumes `claude-sonnet-4-6` always points to the newest Sonnet and so will auto-upgrade. What is true?",
+      "options": ["Correct, dateless IDs are evergreen aliases", "Incorrect, the dateless ID is itself a pinned snapshot; updates ship under a new ID", "Correct, but only on Amazon Bedrock", "Incorrect, dateless IDs are retired immediately"],
+      "answer": 1,
+      "explanation": "From the 4.6 generation, dateless IDs are canonical pinned snapshots. Only pre-4.6 models have aliases that resolve to latest dated snapshots.",
+      "source": "https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions"
+    },
+    {
+      "q": "Your agent uses `claude-sonnet-5` with `tool_choice: {\"type\": \"tool\", \"name\": \"search\"}` and `thinking: {\"type\": \"disabled\"}`. You change only the model ID to `claude-sonnet-5-5`. What happens?",
+      "options": ["It works unchanged", "Requests return 400 errors because both settings are unsupported on Sonnet 5.5", "Only the thinking setting fails", "Responses silently ignore both settings"],
+      "answer": 1,
+      "explanation": "Sonnet 5.5 rejects forced tool use and `disabled` thinking with 400 errors. Use tool_choice auto with strict tool use and `between_tools` thinking.",
+      "source": "https://platform.claude.com/docs/en/models/sonnet-5-5/whats-new-sonnet-5-5"
+    },
+    {
+      "q": "A production app still calls `claude-sonnet-4-5-20250929`. According to the deprecations page, what should you do?",
+      "options": ["Nothing, the model is Active", "Migrate to claude-sonnet-5-5 before Nov 30, 2026 retirement", "Switch to claude-3-haiku-20240307", "Wait for retirement and then retry"],
+      "answer": 1,
+      "explanation": "It is Deprecated with a retirement date of November 30, 2026 and recommended replacement claude-sonnet-5-5. Haiku 3 is already retired.",
+      "source": "https://platform.claude.com/docs/en/about-claude/model-deprecations"
+    },
+    {
+      "q": "A company wants to find which API keys still use deprecated models. What is the documented approach?",
+      "options": ["Call the Models API with the key", "Export the Usage page CSV in Claude Console and review by API key and model", "Email support for a list", "Search request headers for a deprecation flag"],
+      "answer": 1,
+      "explanation": "The Console Usage page Export gives a CSV broken down by API key and model.",
+      "source": "https://platform.claude.com/docs/en/about-claude/model-deprecations"
+    },
+    {
+      "q": "You are building a multihour autonomous coding agent and have no prior evals. Following the capability-first approach, which model do you start with, and when would you escalate?",
+      "options": ["Haiku 5.5; escalate never", "Opus 5.5; escalate to Fable 5.1 if evals at xhigh/max effort still fall short", "Fable 5.1; downgrade to Haiku immediately", "Sonnet 5.5 with thinking disabled; never escalate"],
+      "answer": 1,
+      "explanation": "Docs recommend Opus 5.5 for most workloads and agentic coding, moving to Fable 5.1 if higher-effort evals still fall short.",
+      "source": "https://platform.claude.com/docs/en/about-claude/models/choosing-a-model"
+    },
+    {
+      "q": "Which statement about context window and output limits of the current models is correct?",
+      "options": ["Only Fable has 1M context", "Haiku has a smaller context window than Opus", "All four current models have 1M context and 128K max output", "Max output is 8K on all models"],
+      "answer": 2,
+      "explanation": "The comparison table lists 1M context and 128K output for Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5. Differences are price, latency and capability.",
+      "source": "https://platform.claude.com/docs/en/models/overview"
+    },
+    {
+      "q": "A workload is slightly too slow and expensive on Opus 5.5. Before changing tiers, what does the documentation suggest as often the better lever?",
+      "options": ["Raise temperature", "Tune the effort parameter", "Remove the system prompt", "Use a retired model"],
+      "answer": 1,
+      "explanation": "Effort trades intelligence for latency and cost within one model and is often better than switching. Temperature is removed in newer API versions.",
+      "source": "https://platform.claude.com/docs/en/about-claude/models/choosing-a-model"
+    },
+    {
+      "q": "An enterprise uses Claude on Amazon Bedrock and sees a model retirement date differing from the Claude API's. Why?",
+      "options": ["The docs are wrong", "Bedrock and Google (Google managed) set their own lifecycle schedules", "Bedrock uses older weights", "Retirement dates only apply to Bedrock"],
+      "answer": 1,
+      "explanation": "Dates on the deprecations page cover Anthropic-operated platforms; partner-operated Bedrock and Google managed set their own.",
+      "source": "https://platform.claude.com/docs/en/about-claude/model-deprecations"
+    },
+    {
+      "q": "What is the correct ID for Claude Sonnet 5.5 on Amazon Bedrock?",
+      "options": ["claude-sonnet-5-5", "anthropic.claude-sonnet-5-5", "claude-sonnet-5-5@latest", "anthropic.claude-sonnet-5-5-v1:0"],
+      "answer": 1,
+      "explanation": "Bedrock prefixes IDs with `anthropic.`; the claude-sonnet-5-5 form is used by the Claude API, Google Cloud, Foundry and Platform on AWS. The -v1:0 suffix is for older dated models.",
+      "source": "https://platform.claude.com/docs/en/models/overview"
+    },
+    {
+      "q": "A developer relied on `temperature=0.2` for a Claude 4.7+ model. On API version 2026-10-21, what happens?",
+      "options": ["It is honored", "It returns a 400 error because sampling parameters were removed", "It is clamped to 1.0", "It only affects streaming"],
+      "answer": 1,
+      "explanation": "temperature, top_p and top_k were removed in API version 2026-10-21 and return 400. Guide behavior through prompting instead.",
+      "source": "https://platform.claude.com/docs/en/about-claude/model-deprecations"
+    },
+    {
+      "q": "How much advance notice does Anthropic commit to before retiring a publicly released model?",
+      "options": ["None", "At least 7 days", "At least 60 days", "At least 3 years"],
+      "answer": 2,
+      "explanation": "Anthropic notifies customers with active deployments at least 60 days before retirement, and active models list a not-sooner-than date.",
+      "source": "https://platform.claude.com/docs/en/about-claude/model-deprecations"
+    },
+    {
+      "q": "A pipeline needs an orchestrator to plan a large task and cheaply process many independent chunks. Which design follows documented guidance?",
+      "options": ["Run Fable 5.1 for every chunk", "Use a frontier model as orchestrator and Haiku 5.5 as workers", "Use Haiku as orchestrator and Fable as workers", "Use one model with temperature 0"],
+      "answer": 1,
+      "explanation": "The orchestrator/worker pattern bills most tokens at the lower rate by delegating bulk work to low-cost workers.",
+      "source": "https://platform.claude.com/docs/en/about-claude/models/choosing-a-model"
+    },
+    {
+      "q": "After migrating to Sonnet 5.5, your chat UI that streams text between tool calls goes quiet with no errors. What is the likely cause and fix?",
+      "options": ["The model is retired", "Text between tool calls now comes back in thinking blocks with display omitted; set `thinking.display` or use `between_tools`", "tool_choice must be `any`", "The context window is exhausted"],
+      "answer": 1,
+      "explanation": "Longer notes between tool calls return as progress-update thinking blocks; with default omitted display their text is empty. Set display or use between_tools.",
+      "source": "https://platform.claude.com/docs/en/models/sonnet-5-5/whats-new-sonnet-5-5"
+    },
+    {
+      "q": "Why can a conversation that moves from Sonnet 5.5 to Haiku 5.5 lose its prior reasoning?",
+      "options": ["Thinking blocks are bound to the model that produced them and the target may not read them; unreadable blocks are dropped", "Haiku has no context window", "Thinking is billed twice", "The API rejects the request"],
+      "answer": 0,
+      "explanation": "Each model reads only some other models' thinking blocks. Unreadable blocks are dropped before the model sees them; the request succeeds and dropped blocks are not billed.",
+      "source": "https://platform.claude.com/docs/en/models/sonnet-5-5/whats-new-sonnet-5-5"
+    }
+  ]
+}

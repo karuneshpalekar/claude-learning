@@ -1,0 +1,580 @@
+{
+  "slug": "output-handling",
+  "title": "Output Handling",
+  "overview": "This objective covers how to get Claude's output into a form your application can trust and use: schema-constrained JSON, strict tool inputs, consistency techniques, and robust handling of stop reasons, streaming, citations, and content blocks. It also covers treating model text as untrusted data before you render it. The exam tests whether you pick the right mechanism (structured outputs vs prompting vs prefill) and handle failure paths such as truncation and refusals.",
+  "sources": [
+    {
+      "title": "Structured outputs",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/structured-outputs"
+    },
+    {
+      "title": "Strict tool use",
+      "url": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/strict-tool-use"
+    },
+    {
+      "title": "Increase output consistency",
+      "url": "https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/increase-consistency"
+    },
+    {
+      "title": "Using the Messages API (prefill)",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/working-with-messages"
+    },
+    {
+      "title": "Prompting best practices",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices"
+    },
+    {
+      "title": "Handling stop reasons",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons"
+    },
+    {
+      "title": "Refusals and fallback",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback"
+    },
+    {
+      "title": "Streaming messages",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/streaming"
+    },
+    {
+      "title": "Citations",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/citations"
+    },
+    {
+      "title": "Mitigate jailbreaks and prompt injections",
+      "url": "https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/mitigate-jailbreaks"
+    }
+  ],
+  "sections": [
+    {
+      "heading": "Structured outputs: JSON outputs via output_config.format",
+      "notes": [
+        "Structured outputs constrain Claude's response text to a JSON Schema so your app gets valid, parseable JSON. It has two parts: **JSON outputs** (`output_config.format`) control what Claude says; **strict tool use** (`strict: true`) controls how Claude calls tools. They can be used independently or together.",
+        "Send `output_config: {format: {type: \"json_schema\", schema: {...}}}`. The JSON arrives in a normal `text` content block; parse it with `json.loads`, or use the SDK helper `client.messages.parse(..., output_format=PydanticModel)` which validates and returns `response.parsed_output`.",
+        "The older top-level `output_format` parameter and the `structured-outputs-2025-11-13` beta header are deprecated; the current location is `output_config.format` and no beta header is needed.",
+        "SDK helpers transform schemas: they strip unsupported constraints (min/max, minLength/maxLength), move them into field descriptions, add `additionalProperties: false`, and then validate the response against your original schema.",
+        "Structured outputs use grammar-constrained sampling. The first request with a new schema has extra compile latency; compiled grammars are cached for 24 hours after last use. Changing structure invalidates the cache, changing only `name`/`description` does not.",
+        "Works with Batch API (50% discount) and token counting. Changing `output_config.format` invalidates the prompt cache for that conversation, and the format adds some input tokens."
+      ],
+      "example": {
+        "title": "Typed extraction with a Pydantic model",
+        "language": "python",
+        "code": "from pydantic import BaseModel\nimport anthropic\n\nclient = anthropic.Anthropic()\n\nclass ContactInfo(BaseModel):\n    name: str\n    email: str\n    plan_interest: str\n    demo_requested: bool\n\nresponse = client.messages.parse(\n    model=\"claude-opus-5-5\",\n    max_tokens=1024,\n    messages=[{\"role\": \"user\", \"content\": \"Extract the key information from this email: John Smith (john@example.com) wants an Enterprise demo next Tuesday at 2pm.\"}],\n    output_format=ContactInfo,\n)\nprint(response.parsed_output)\n\n# Raw-schema alternative (you parse yourself):\n# text = next(b.text for b in response.content if b.type == \"text\")\n# contact = json.loads(text)"
+      },
+      "examTips": [
+        "If the question says 'guaranteed schema-valid JSON', the answer is structured outputs (`output_config.format`), not prompt instructions or prefill.",
+        "Structured outputs guarantee the shape, not the truth of the values. Semantic validation (is the email real, is the date plausible) is still your job.",
+        "Even with structured outputs, the schema guarantee does not hold when `stop_reason` is `max_tokens` or `refusal`."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/structured-outputs"
+    },
+    {
+      "heading": "JSON Schema support and limits",
+      "notes": [
+        "**Supported:** object, array, string, integer, number, boolean, null; `enum` (primitives only), `const`, `anyOf`, `allOf` (not with `$ref`), internal `$ref`/`$defs`/`definitions`, `default`, `required`, string formats (`date-time`, `time`, `date`, `duration`, `email`, `hostname`, `uri`, `ipv4`, `ipv6`, `uuid`), array `minItems` of 0 or 1, and simple regex.",
+        "**Not supported:** recursive schemas, external `$ref`, `minimum`/`maximum`/`multipleOf`, `minLength`/`maxLength`, array constraints beyond `minItems` 0/1, `additionalProperties` other than `false`, regex backreferences/lookaround/`\\b`. Unsupported features return a 400 error.",
+        "`additionalProperties` must be `false` on every object.",
+        "**Complexity limits:** 20 strict tools per request, 24 optional parameters across all strict schemas, 16 parameters with union types. Over-complex schemas fail with 'Schema is too complex for compilation'. Remedies: mark only critical tools strict, make params required, flatten nesting, split across requests.",
+        "Property order in output: required properties first, then optional, each in schema order. Mark everything required if order matters.",
+        "**Enum casing:** Claude may change capitalization of `enum`/`const` values (typically first letter after a space) with no error. Compare case-insensitively and avoid enum values differing only by case."
+      ],
+      "examTips": [
+        "Need a numeric range (age 0-120)? The API will not enforce `minimum`/`maximum`; validate in your own code after parsing (SDK helpers re-validate against the original schema).",
+        "A recursive schema (tree/comment thread) is rejected; flatten it or use a depth-limited non-recursive shape.",
+        "Asking for 'reasoning' as a schema property can trigger a `reasoning_extraction` refusal; ask for a short explanation instead."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/structured-outputs"
+    },
+    {
+      "heading": "Strict tool use",
+      "notes": [
+        "Setting `strict: true` on a tool definition uses grammar-constrained sampling so the tool `input` always matches `input_schema` and the tool `name` is always valid. Without it Claude may send `\"2\"` instead of `2` or omit a required field.",
+        "`strict` is a top-level tool property beside `name`, `description`, and `input_schema`. Use `additionalProperties: false` in the schema.",
+        "Benefit for agents: type-safe arguments without a validate-and-retry loop.",
+        "JSON outputs and strict tools can be combined in one request: Claude may return a `tool_use` block first, or a `text` block containing the JSON.",
+        "The computer use and browser use toolset entries do not accept `strict: true`.",
+        "Do not put PHI in schema property names, enum values, const values, or regex patterns: schemas are cached up to 24 hours and do not get message-content protections."
+      ],
+      "example": {
+        "title": "Strict tool definition",
+        "language": "python",
+        "code": "tools = [{\n    \"name\": \"search_flights\",\n    \"description\": \"Search flights\",\n    \"strict\": True,\n    \"input_schema\": {\n        \"type\": \"object\",\n        \"properties\": {\n            \"destination\": {\"type\": \"string\"},\n            \"departure_date\": {\"type\": \"string\", \"format\": \"date\"},\n            \"passengers\": {\"type\": \"integer\", \"enum\": [1, 2, 3, 4, 5, 6]}\n        },\n        \"required\": [\"destination\", \"departure_date\"],\n        \"additionalProperties\": False\n    }\n}]"
+      },
+      "examTips": [
+        "Distinguish: `output_config.format` shapes the final answer text; `strict: true` shapes tool call arguments. A question about 'tool arguments with wrong types' points to strict.",
+        "Strict guarantees valid input shape, not that the tool call is a good idea. Authorization and business-rule checks stay in your code."
+      ],
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/strict-tool-use"
+    },
+    {
+      "heading": "Consistency techniques (prompt-level)",
+      "notes": [
+        "For guaranteed JSON schema conformance, Anthropic says to use structured outputs instead of prompt techniques. Prompt techniques remain useful for general consistency or when you need flexibility beyond strict schemas (for example XML or custom templates).",
+        "**Specify the exact output format** (JSON, XML, or a custom template) with named keys and allowed values.",
+        "**Constrain with examples:** showing the desired output format is more effective than abstract instructions.",
+        "**Use retrieval** to ground answers in a fixed knowledge set (for example a `<kb>` of entries) so answers are consistent.",
+        "**Chain prompts:** split complex tasks into single-purpose subtasks to reduce inconsistency at scale.",
+        "**System prompts for role/character:** define role, personality, and scenario handling to keep tone consistent.",
+        "Prefer direct instructions such as 'respond directly without preamble' over prefill on current models."
+      ],
+      "example": {
+        "title": "Format specified by example in the prompt",
+        "language": "text",
+        "code": "Output following this example format:\n\n<competitor>\n  <name>Rival Inc</name>\n  <overview>A 50-word summary.</overview>\n  <strategy>A 30-word strategic response.</strategy>\n</competitor>\n\nNow analyze AcmeGiant using this format."
+      },
+      "examTips": [
+        "Pick the lightest tool that gives the guarantee required: schema guarantee -> structured outputs; style/tone consistency -> system prompt + examples; consistent facts -> retrieval.",
+        "Examples beat abstract rules for formatting consistency."
+      ],
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/increase-consistency"
+    },
+    {
+      "heading": "Prefill status and migration",
+      "notes": [
+        "Prefill means putting a partial `assistant` message in the last position so Claude continues from it (for example `{` to force JSON, or `\"The answer is (\"`).",
+        "**Status:** prefilling is NOT supported on Claude 4.6 and later models or Claude Mythos Preview. A request with a prefilled last assistant turn returns a **400 error**. Earlier models still support it, and assistant messages elsewhere in the conversation are unaffected.",
+        "**Migration:** forced JSON/YAML or classification -> structured outputs, or tools with an enum field for labels; skipping preamble -> direct system-prompt instruction, output inside XML tags, or strip in post-processing; steering around refusals -> clear user-message prompting; continuing partial output -> user message asking to continue; context reinjection -> put reminders in the user turn or hydrate via tools.",
+        "In streaming error recovery for Claude 4.6+, the partial response goes into a user message with a continue instruction, not into an assistant prefill."
+      ],
+      "example": {
+        "title": "Legacy prefill (older models only) vs current approach",
+        "language": "python",
+        "code": "# Legacy (older models only; 400 error on Claude 4.6+):\nmessages = [\n    {\"role\": \"user\", \"content\": \"Return the contact as JSON.\"},\n    {\"role\": \"assistant\", \"content\": \"{\"},   # prefill\n]\n\n# Current: structured outputs\nresponse = client.messages.create(\n    model=\"claude-opus-5-5\",\n    max_tokens=1024,\n    messages=[{\"role\": \"user\", \"content\": \"Return the contact as JSON.\"}],\n    output_config={\"format\": {\"type\": \"json_schema\", \"schema\": schema}},\n)"
+      },
+      "examTips": [
+        "If an answer option uses prefill to force JSON on a current model, it is the trap: it errors with 400. Choose structured outputs.",
+        "Prefill is not deprecated for every model; it is unsupported on 4.6+ models. Read which model the scenario uses."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/working-with-messages"
+    },
+    {
+      "heading": "Parsing and validating output",
+      "notes": [
+        "`response.content` is an **array** of blocks, not a string. Iterate and branch on `block.type`; do not assume `content[0]` is text.",
+        "With structured outputs, read the `text` block and `json.loads` it (or use `messages.parse`). Always check `stop_reason` first: a `max_tokens` cut-off yields truncated, invalid JSON and a `refusal` may not match the schema.",
+        "Without structured outputs, treat output as untrusted: parse inside try/except, validate with a schema validator (Pydantic, Zod, jsonschema), and retry or fall back on failure. Newer models match complex schemas reliably when asked, especially with retries.",
+        "Validate what the API does not enforce: numeric ranges, string lengths, cross-field rules, and referential checks (IDs exist). SDK helpers can re-validate against your original schema after stripping constraints for the API.",
+        "For tool calls, `tool_use.input` is already a parsed object (not a string) in non-streaming responses."
+      ],
+      "example": {
+        "title": "Defensive parse loop",
+        "language": "python",
+        "code": "import json\nfrom pydantic import BaseModel, ValidationError, Field\n\nclass Ticket(BaseModel):\n    category: str\n    priority: int = Field(ge=1, le=5)  # range enforced by YOUR validator\n\ndef get_ticket(client, prompt):\n    for attempt in range(2):\n        r = client.messages.create(model=\"claude-opus-5-5\", max_tokens=1024,\n            messages=[{\"role\": \"user\", \"content\": prompt}],\n            output_config={\"format\": {\"type\": \"json_schema\", \"schema\": Ticket.model_json_schema()}})\n        if r.stop_reason in (\"max_tokens\", \"refusal\"):\n            raise RuntimeError(r.stop_reason)\n        text = next(b.text for b in r.content if b.type == \"text\")\n        try:\n            return Ticket.model_validate(json.loads(text))\n        except (json.JSONDecodeError, ValidationError):\n            continue\n    raise ValueError(\"invalid output after retries\")"
+      },
+      "examTips": [
+        "Order of operations: check `stop_reason` -> find the right content block -> parse -> validate -> use.",
+        "Never `eval()` model output. Parse with a real JSON/XML parser."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/structured-outputs"
+    },
+    {
+      "heading": "stop_reason handling: max_tokens, tool_use, pause_turn and others",
+      "notes": [
+        "`end_turn`: natural finish, use the response. `max_tokens`: hit your limit; raise `max_tokens` or continue. If the cut block is an incomplete `tool_use`, retry with a higher limit. `stop_sequence`: read `response.stop_sequence` to see which fired.",
+        "`tool_use`: run the tool, then send a user message of `tool_result` blocks (one per `tool_use` block, no text after them), keeping the same `tools` array.",
+        "`pause_turn`: a server-tool loop hit its iteration limit (default 10). Append the assistant content unchanged and resend; if a `container` is present, send its ID back.",
+        "`model_context_window_exceeded`: the response filled the context window; treat as truncated (typed only in beta namespace on older SDKs; earlier models need the `model-context-window-exceeded-2025-08-26` beta header).",
+        "`refusal`: see next section.",
+        "Errors (4xx/5xx) mean the request failed; stop reasons arrive in successful 200 responses. Handle both. In streaming, `stop_reason` is `null` in `message_start` and appears in `message_delta`.",
+        "Empty `end_turn` after tool results: do not add text blocks right after tool results; if still empty, add a continuation prompt in a new user message."
+      ],
+      "example": {
+        "title": "stop_reason dispatch",
+        "language": "python",
+        "code": "reason = response.stop_reason\nif reason == \"end_turn\":\n    return response\nif reason == \"max_tokens\":\n    # truncated: raise max_tokens or continue\n    ...\nif reason == \"tool_use\":\n    messages.append({\"role\": \"assistant\", \"content\": response.content})\n    results = [{\"type\": \"tool_result\", \"tool_use_id\": b.id,\n                \"content\": run_tool(b.name, b.input)}\n               for b in response.content if b.type == \"tool_use\"]\n    messages.append({\"role\": \"user\", \"content\": results})\nif reason == \"pause_turn\":\n    messages.append({\"role\": \"assistant\", \"content\": response.content})  # unchanged\nif reason == \"refusal\":\n    print(response.stop_details)"
+      },
+      "examTips": [
+        "`max_tokens` is not an error; the HTTP status is 200 and the JSON may be cut mid-string. Always check it before parsing.",
+        "`pause_turn` is resumed by sending the assistant content back unchanged, not by adding a new user prompt.",
+        "Tool results go in a `user` message, and every `tool_use` block needs a matching `tool_result`."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons"
+    },
+    {
+      "heading": "Refusals (stop_reason: refusal)",
+      "notes": [
+        "On current models with safety classifiers (Fable, Opus 5.x, Sonnet 5.5, Haiku 5.5), a declined request returns a normal **HTTP 200** with `stop_reason: \"refusal\"`, not an error.",
+        "`stop_details` carries `category` (for example `cyber`, `bio`, `frontier_llm`, `general_harms`, `reasoning_extraction`) and a human-readable `explanation` (text is not stable: display it, do not parse it). Both can be `null`. `stop_details` is `null` for every other stop reason.",
+        "With structured outputs a refusal's output may not match your schema because the refusal message takes precedence. Check `stop_reason` before parsing.",
+        "**Billing:** you are billed for generated tokens. A refusal before any output is billed only for certain categories (`bio`, `frontier_llm`, `reasoning_extraction` as documented).",
+        "**Recovery:** usually retry the same request on another Claude model. Options: server-side fallback (`fallbacks: \"default\"` with the beta header, which adds `fallback` content blocks marking model boundaries), SDK middleware, or your own retry. Claude Haiku 5.5 has no server-side fallback, so retry in your client.",
+        "In a screening/classifier pipeline, treat a `refusal` from the screening call as a harmful/unsafe verdict, because no verdict could be read."
+      ],
+      "example": {
+        "title": "Refusal-safe structured call",
+        "language": "python",
+        "code": "r = client.messages.create(model=\"claude-haiku-5-5\", max_tokens=256,\n    messages=[{\"role\": \"user\", \"content\": screen_prompt}],\n    output_config={\"format\": {\"type\": \"json_schema\", \"schema\": {\n        \"type\": \"object\",\n        \"properties\": {\"is_harmful\": {\"type\": \"boolean\"}},\n        \"required\": [\"is_harmful\"], \"additionalProperties\": False}}})\nif r.stop_reason == \"refusal\":\n    verdict_harmful = True      # no verdict -> treat as harmful\nelse:\n    verdict_harmful = json.loads(r.content[0].text)[\"is_harmful\"]"
+      },
+      "examTips": [
+        "A refusal is a successful response, so `try/except` around API errors will not catch it; check `stop_reason`.",
+        "Do not parse `explanation` text or match on it; it can change."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback"
+    },
+    {
+      "heading": "Streaming",
+      "notes": [
+        "Set `stream: true` (or use SDK stream helpers) to receive server-sent events. Event flow: `message_start` (Message with empty content) -> for each block: `content_block_start`, one or more `content_block_delta`, `content_block_stop` -> one or more `message_delta` -> `message_stop`. Each block has an `index` matching its position in final `content`.",
+        "Delta types: `text_delta` (text), `input_json_delta` (tool_use input as **partial JSON strings**), `thinking_delta` and `signature_delta` (thinking blocks; signature arrives just before block stop), and `citations_delta` (one citation to append to a text block).",
+        "For tools, accumulate `partial_json` strings and parse only after `content_block_stop`; the final `input` is an object. SDK helpers parse incrementally. Models emit one complete key/value at a time, so pauses between events are normal.",
+        "`message_delta` carries `stop_reason` and **cumulative** usage token counts. `ping` events may appear anywhere. `error` events can arrive mid-stream (for example `overloaded_error`, normally HTTP 529 outside streaming).",
+        "**Error recovery:** save received content; for Claude 4.5 and earlier, continue with the partial text as an assistant message; for 4.6+, send a user message containing the partial response and an instruction to continue. Tool use and thinking blocks cannot be partially recovered; resume from the last complete text block.",
+        "Use streaming for long outputs and responsive UIs; SDKs also offer a helper to get the final assembled message without handling events."
+      ],
+      "example": {
+        "title": "Tool-use input arrives as partial JSON",
+        "language": "text",
+        "code": "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_01...\",\"name\":\"get_weather\",\"input\":{}}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"location\\\":\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\" \\\"San Francisco, CA\\\"}\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}"
+      },
+      "examTips": [
+        "Do not call `json.loads` on each `partial_json` chunk; concatenate until `content_block_stop`.",
+        "In streaming, read `stop_reason` from `message_delta`, not `message_start` (it is null there).",
+        "Token counts in `message_delta.usage` are cumulative, not per-event increments."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/streaming"
+    },
+    {
+      "heading": "Citations",
+      "notes": [
+        "Citations ground answers in provided documents and return exact supporting passages. Enable with `citations: {enabled: true}` on each `document` block; it must be enabled on all or none of the documents in a request. Only text citations are supported (no image citations).",
+        "Document types and citation types: **plain text** -> `char_location` (0-indexed characters, exclusive end); **PDF** -> `page_location` (1-indexed pages, exclusive end page); **custom content** -> `content_block_location` (0-indexed blocks, exclusive end). `document_index` is 0-indexed across all document blocks in the request.",
+        "Plain text and PDFs are auto-chunked into sentences. For finer control (bullets, transcripts, RAG chunks you do not want re-chunked) use custom content documents.",
+        "Responses may contain multiple `text` blocks, each with its own `citations` list. `cited_text` is provided for convenience and does **not** count toward output (or input on later turns) tokens, and citations are guaranteed valid pointers into the provided docs.",
+        "In streaming, each citation arrives as a `citations_delta` inside `content_block_delta`, appended to the current text block's `citations`.",
+        "**Citations are incompatible with structured outputs:** enabling citations on `document`/`search_result` blocks plus `output_config.format` returns a 400. To get per-field citations, ask for one line per field and parse it yourself."
+      ],
+      "example": {
+        "title": "Plain-text document with citations enabled",
+        "language": "python",
+        "code": "response = client.messages.create(\n    model=\"claude-opus-5-5\",\n    max_tokens=1024,\n    messages=[{\"role\": \"user\", \"content\": [\n        {\"type\": \"document\",\n         \"source\": {\"type\": \"text\", \"media_type\": \"text/plain\",\n                    \"data\": \"The grass is green. The sky is blue.\"},\n         \"title\": \"My Document\",\n         \"citations\": {\"enabled\": True}},\n        {\"type\": \"text\", \"text\": \"What color is the grass and sky?\"}\n    ]}],\n)\nfor block in response.content:\n    if block.type == \"text\":\n        for c in (block.citations or []):\n            print(c.type, c.cited_text, c.start_char_index, c.end_char_index)"
+      },
+      "examTips": [
+        "Memorize indexing: chars 0-indexed, pages 1-indexed, blocks 0-indexed; all ends exclusive.",
+        "'Need JSON schema AND citations in the same call' is a trap: it returns 400; use a prompt-based line format instead.",
+        "Citations beat asking Claude to quote text: more reliable and cheaper because `cited_text` is not billed as output."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/citations"
+    },
+    {
+      "heading": "XML tags for extraction and structure",
+      "notes": [
+        "XML tags help Claude parse prompts that mix instructions, context, examples, and inputs. Use consistent, descriptive tag names and nest tags for hierarchy (for example `<documents><document index=\"1\"><source>..</source><document_content>..</document_content></document></documents>`).",
+        "For output, ask Claude to wrap parts in tags (for example `<answer>`, `<report>`), then extract with a real parser or a simple regex. This also lets you separate the final answer from reasoning or preamble.",
+        "XML-tag output is a prompt-level technique with no schema guarantee. If you need guaranteed structure use structured outputs; if the model sometimes adds preamble, extract only the tagged region or strip in post-processing.",
+        "Wrap untrusted content (user text, retrieved docs) in its own tags and tell Claude it is data. For true untrusted third-party content, Anthropic recommends delivering it in `tool_result` blocks and JSON-encoding it."
+      ],
+      "example": {
+        "title": "Tagged output and extraction",
+        "language": "python",
+        "code": "prompt = \"\"\"Summarize the ticket.\n<ticket>\n{ticket_text}\n</ticket>\nPut your reasoning in <analysis> tags and the final one-sentence summary in <summary> tags.\"\"\"\n\nimport re\ntext = next(b.text for b in response.content if b.type == \"text\")\nm = re.search(r\"<summary>(.*?)</summary>\", text, re.S)\nsummary = m.group(1).strip() if m else None   # handle missing tag"
+      },
+      "examTips": [
+        "Always handle the 'tag missing' case (stop_reason max_tokens or a refusal may cut the output).",
+        "XML tags are for structure and extraction convenience, not a security boundary."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices"
+    },
+    {
+      "heading": "Content block types in responses",
+      "notes": [
+        "A response's `content` is an ordered array of typed blocks. Common types: `text` (with optional `citations`), `tool_use` (`id`, `name`, `input`), `thinking` (`thinking`, `signature`), `redacted_thinking` (opaque `data`), `server_tool_use` (server-side tools like web search, `srvtoolu_` ids), and server tool result blocks such as `web_search_tool_result`, `web_fetch_tool_result`, `code_execution_tool_result` (each with `tool_use_id`). Server-side fallback adds a `fallback` block at model boundaries.",
+        "Write code that switches on `block.type` and ignores unknown types gracefully; new block types are added over time.",
+        "Pass `thinking` and `redacted_thinking` blocks back unmodified and in order when continuing a tool-use conversation with thinking enabled. Tool-use and thinking blocks cannot be partially recovered after a stream error.",
+        "A `server_tool_use` block without a matching result block is still pending (relevant to `pause_turn`).",
+        "In the request direction, `tool_result` blocks live in a `user` message and must reference the `tool_use_id`. Never put text blocks before/after in a way that breaks the required tool_result-first ordering."
+      ],
+      "example": {
+        "title": "Switching on block types",
+        "language": "python",
+        "code": "for block in response.content:\n    if block.type == \"text\":\n        render_text(block.text)\n    elif block.type == \"tool_use\":\n        queue_tool(block.id, block.name, block.input)\n    elif block.type == \"thinking\":\n        keep_for_next_turn(block)         # return unmodified\n    elif block.type == \"redacted_thinking\":\n        keep_for_next_turn(block)\n    elif block.type == \"server_tool_use\":\n        pass                              # executed by Anthropic\n    else:\n        log_unknown(block.type)"
+      },
+      "examTips": [
+        "Do not assume the first block is text: with thinking or tools enabled, `thinking` or `tool_use` may come first.",
+        "Extended-thinking blocks must be preserved intact; editing a thinking block's text breaks signature verification."
+      ],
+      "source": "https://platform.claude.com/docs/en/build-with-claude/working-with-messages"
+    },
+    {
+      "heading": "Sanitizing output before rendering",
+      "notes": [
+        "Treat everything Claude returns as **untrusted data**. Model text can include markup, links, or script-like content, especially when the prompt included user input or third-party content (prompt injection). Anthropic's docs do not provide a dedicated XSS page; the guidance below combines the official injection-mitigation page with standard web-security practice.",
+        "Official guidance (mitigate prompt injection): keep untrusted content in `tool_result` blocks, JSON-encode third-party strings, state an untrusted-content policy in the system prompt, apply least privilege, screen tool outputs with a small model and structured outputs, and monitor outputs for signs of successful injection.",
+        "Rendering practice (standard web security, not an Anthropic page): render model text as plain text where possible; if you render Markdown/HTML, escape or sanitize with a trusted library (for example DOMPurify), never set `innerHTML` from model output, allow-list link schemes (block `javascript:`), and proxy or block auto-loading remote images (data exfiltration via image URLs).",
+        "Validate structured fields before using them in sinks: model-provided strings used in SQL, shell commands, file paths, or URLs must go through parameterization, allow-lists, and path checks. Structured outputs guarantee shape, not safety.",
+        "Gate high-impact actions (payments, deletions, external messages) behind confirmation or checks in your own code, not on the model's say-so."
+      ],
+      "example": {
+        "title": "Escape before inserting into HTML",
+        "language": "typescript",
+        "code": "// BAD: element.innerHTML = response.content[0].text;\n\n// GOOD: treat as text\nel.textContent = textBlock.text;\n\n// If Markdown/HTML rendering is required, sanitize first\nimport DOMPurify from \"dompurify\";\nel.innerHTML = DOMPurify.sanitize(renderMarkdown(textBlock.text));"
+      },
+      "examTips": [
+        "The correct answer for 'Claude's reply is shown in a web page' is escape/sanitize output as untrusted. 'Claude is trained to be safe, so render directly' is the wrong option.",
+        "Structured output does not make field values safe; still escape and validate.",
+        "Delivering third-party content via `tool_result` (and JSON-encoding) is the documented way to mark it as untrusted input."
+      ],
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/mitigate-jailbreaks"
+    }
+  ],
+  "keyTakeaways": [
+    "Guaranteed JSON schema conformance = structured outputs (`output_config.format` with `type: json_schema`); prompting alone gives no guarantee.",
+    "`strict: true` on a tool guarantees tool `input` matches `input_schema` and the tool name is valid; JSON outputs shape the answer text. They can be combined.",
+    "Schemas need `additionalProperties: false`; numeric/length constraints and recursive schemas are unsupported (400). Limits: 20 strict tools, 24 optional params, 16 union-type params.",
+    "Prefill on the last assistant turn is unsupported on Claude 4.6+ and Mythos Preview (400). Use structured outputs or system-prompt instructions instead.",
+    "Always check `stop_reason` before parsing: `max_tokens` means truncated output; `refusal` means output may not match the schema.",
+    "`refusal` is HTTP 200 with `stop_details` (category, explanation). Retry on a fallback model; treat refusals in screening calls as an unsafe verdict.",
+    "`tool_use` -> return `tool_result` blocks in a user message; `pause_turn` -> resend assistant content unchanged.",
+    "Streaming: `message_start` -> block start/delta/stop -> `message_delta` (stop_reason, cumulative usage) -> `message_stop`. Tool input arrives as `input_json_delta` partial JSON; parse at block stop.",
+    "Citations: char (0-idx), page (1-idx), content-block (0-idx) locations with exclusive ends; `cited_text` is not billed as output; incompatible with structured outputs (400).",
+    "`content` is an array of typed blocks (text, tool_use, thinking, redacted_thinking, server_tool_use, tool result blocks); switch on `type` and pass thinking blocks back unmodified.",
+    "Model output is untrusted data: escape/sanitize before rendering, validate before using in sinks, and put third-party content in `tool_result` blocks.",
+    "Enum values may come back with different capitalization under structured outputs; compare case-insensitively."
+  ],
+  "glossary": [
+    {
+      "term": "Structured outputs",
+      "definition": "Feature that constrains Claude's response to a JSON Schema via grammar-constrained sampling, configured with `output_config.format`."
+    },
+    {
+      "term": "output_config.format",
+      "definition": "Request parameter (type `json_schema` plus a `schema`) that replaces the deprecated `output_format` and its beta header."
+    },
+    {
+      "term": "Strict tool use",
+      "definition": "Setting `strict: true` on a tool so its inputs always conform to `input_schema`."
+    },
+    {
+      "term": "Grammar-constrained sampling",
+      "definition": "Technique restricting token sampling to outputs valid under a compiled grammar derived from your schema; compiled grammars are cached 24 hours."
+    },
+    {
+      "term": "Prefill",
+      "definition": "Providing a partial final assistant message for Claude to continue; unsupported on Claude 4.6+ models (400 error)."
+    },
+    {
+      "term": "stop_reason",
+      "definition": "Field explaining why generation ended: end_turn, max_tokens, stop_sequence, tool_use, pause_turn, refusal, model_context_window_exceeded."
+    },
+    {
+      "term": "stop_details",
+      "definition": "Object on refusal responses with `category` and `explanation`; null for other stop reasons."
+    },
+    {
+      "term": "pause_turn",
+      "definition": "Stop reason when a server-tool loop hits its iteration limit; resend the assistant content unchanged to continue."
+    },
+    {
+      "term": "Server-side fallback",
+      "definition": "Beta feature (`fallbacks: \"default\"`) that retries a refused request on a recommended model within one API call."
+    },
+    {
+      "term": "Server-sent events (SSE)",
+      "definition": "Protocol used for streaming: named events such as message_start, content_block_delta, message_delta, message_stop, ping, error."
+    },
+    {
+      "term": "input_json_delta",
+      "definition": "Streaming delta carrying partial JSON strings for a tool_use block's input."
+    },
+    {
+      "term": "citations_delta",
+      "definition": "Streaming delta that adds a single citation to the current text block."
+    },
+    {
+      "term": "char_location / page_location / content_block_location",
+      "definition": "Citation types for plain text (0-indexed chars), PDF (1-indexed pages), and custom content (0-indexed blocks); ends are exclusive."
+    },
+    {
+      "term": "cited_text",
+      "definition": "The quoted source passage returned in a citation; not counted toward output tokens."
+    },
+    {
+      "term": "Content block",
+      "definition": "A typed element of the response `content` array (text, tool_use, thinking, redacted_thinking, server_tool_use, tool results)."
+    },
+    {
+      "term": "Untrusted output",
+      "definition": "Model text that must be escaped/validated before rendering or use in sensitive sinks; third-party content should arrive via tool_result blocks."
+    }
+  ],
+  "quiz": [
+    {
+      "q": "A support app must extract {category, priority, summary} from tickets and feed it to a typed pipeline. Occasionally Claude wraps the JSON in prose and breaks the parser. The team uses a current Claude 5.x model. What is the most reliable fix?",
+      "options": [
+        "Prefill the assistant turn with `{` to force JSON",
+        "Use structured outputs with `output_config.format` of type `json_schema`",
+        "Add 'respond only with JSON' to the system prompt and retry on failure",
+        "Lower the temperature to 0"
+      ],
+      "answer": 1,
+      "explanation": "Structured outputs provide guaranteed schema-valid JSON via constrained sampling. Prefill returns a 400 on Claude 4.6+. Prompt instructions are not a guarantee, and sampling parameters like temperature are not supported on newer models (and would not guarantee shape anyway).",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/structured-outputs"
+    },
+    {
+      "q": "Your code calls `json.loads` on the text block from a structured-outputs request and sometimes raises JSONDecodeError although the schema is valid. What should you check first?",
+      "options": [
+        "Whether `stop_reason` is `max_tokens` (truncated output)",
+        "Whether the schema uses `additionalProperties: false`",
+        "Whether the model name is correct",
+        "Whether `strict: true` was set on a tool"
+      ],
+      "answer": 0,
+      "explanation": "A response cut off at `max_tokens` can be incomplete and invalid against the schema; raise the limit and retry. `additionalProperties: false` is required by the API (a 400 otherwise, not a decode error), and `strict` applies to tools, not to JSON outputs.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/structured-outputs"
+    },
+    {
+      "q": "A booking agent sometimes calls `book_flight` with `passengers: \"2\"` (string) instead of `2`, crashing downstream code. Which change addresses this most directly?",
+      "options": [
+        "Set `strict: true` on the tool with `additionalProperties: false` in its input_schema",
+        "Set `output_config.format` to a JSON schema",
+        "Ask Claude to double-check types in the prompt",
+        "Switch to streaming"
+      ],
+      "answer": 0,
+      "explanation": "Strict tool use guarantees tool inputs match `input_schema` types. `output_config.format` shapes final text, not tool arguments. Prompt reminders are not guaranteed and streaming is unrelated.",
+      "source": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/strict-tool-use"
+    },
+    {
+      "q": "A schema for an 'age' field uses `minimum: 0, maximum: 120`, and the raw API call returns a 400 error. What is the correct approach?",
+      "options": [
+        "Wrap the number in a string",
+        "Remove the numeric constraints from the API schema and enforce the range in your own validation (SDK helpers can do this transform)",
+        "Add the beta header `structured-outputs-2025-11-13`",
+        "Use `additionalProperties: true`"
+      ],
+      "answer": 1,
+      "explanation": "Numeric constraints such as minimum/maximum are unsupported by the API and cause a 400. Strip them (optionally noting the range in the description) and validate after parsing. The beta header is deprecated, and `additionalProperties` must be false.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/structured-outputs"
+    },
+    {
+      "q": "An older codebase forces JSON by prefilling the assistant turn with `{`. After migrating to Claude Opus 4.6+, every request fails with 400. What is the cause and the recommended migration?",
+      "options": [
+        "The `{` character is invalid; use `[` instead",
+        "Prefill is unsupported on Claude 4.6+; use structured outputs or system-prompt instructions",
+        "The max_tokens value is too low",
+        "Prefill now requires a beta header"
+      ],
+      "answer": 1,
+      "explanation": "Prefilling the last assistant turn is not supported on Claude 4.6+ and Mythos Preview, and returns 400. Anthropic recommends structured outputs (or direct instructions) instead. No header re-enables it.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/working-with-messages"
+    },
+    {
+      "q": "You enable citations on uploaded PDFs and also set `output_config.format` to a JSON schema so each claim comes as structured data. What happens?",
+      "options": [
+        "The API returns each claim with embedded citation objects inside the JSON",
+        "The API returns a 400 error because citations and structured outputs are incompatible",
+        "Citations are silently dropped",
+        "Only the first document is cited"
+      ],
+      "answer": 1,
+      "explanation": "Citations interleave citation blocks with text, which conflicts with strict JSON-schema constraints, so the API returns 400. To combine them conceptually, prompt for a line-per-field format and parse it in code.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/citations"
+    },
+    {
+      "q": "A web page shows Claude's replies. A security reviewer worries that a user pasted malicious content that Claude echoes back. What is the correct handling?",
+      "options": [
+        "Trust the output since Claude is safety-trained",
+        "Treat output as untrusted: render as plain text or escape/sanitize it before inserting into the DOM",
+        "Wrap the reply in XML tags and render directly",
+        "Use structured outputs, which makes strings safe"
+      ],
+      "answer": 1,
+      "explanation": "Model output can contain markup or injected content and must be escaped or sanitized before rendering. XML tags are a structuring aid, not a security boundary, and structured outputs only guarantee shape, not content safety.",
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/mitigate-jailbreaks"
+    },
+    {
+      "q": "A response arrives with `stop_reason: \"tool_use\"`. What must your next request contain?",
+      "options": [
+        "A user message containing a `tool_result` block for each `tool_use` block, with the same tools array",
+        "An assistant prefill with the tool output",
+        "A new system prompt describing the result",
+        "Only the latest tool_result, dropping the assistant message"
+      ],
+      "answer": 0,
+      "explanation": "You append the assistant content, then a user message with one `tool_result` per `tool_use` (no text after them), keeping the same `tools`. Prefill and system prompts are not the mechanism, and omitting the assistant turn breaks the pairing.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons"
+    },
+    {
+      "q": "Your moderation pipeline calls a small Claude model with structured outputs to return `{is_harmful: bool}`. One call returns HTTP 200 with `stop_reason: \"refusal\"` and no JSON. How should the pipeline treat it?",
+      "options": [
+        "Treat it as not harmful",
+        "Retry indefinitely until JSON appears",
+        "Treat it as a harmful verdict (no verdict could be produced)",
+        "Crash the pipeline with an unhandled exception"
+      ],
+      "answer": 2,
+      "explanation": "Anthropic's guidance is to treat a refusal from a screening call as a harmful verdict. A refusal is a successful 200 response, so try/except on API errors will not catch it, and blind retries just repeat the refusal.",
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/mitigate-jailbreaks"
+    },
+    {
+      "q": "While streaming a tool call, your handler runs `json.loads` on each `input_json_delta.partial_json` and keeps failing. What is the correct approach?",
+      "options": [
+        "Disable streaming for tool calls",
+        "Accumulate the partial_json strings and parse once at `content_block_stop` (or use SDK helpers)",
+        "Parse only the last delta",
+        "Ask Claude to send smaller chunks"
+      ],
+      "answer": 1,
+      "explanation": "Deltas are fragments of a JSON string; the final `input` is an object assembled from all fragments. Parse after the block stops, or use the SDK's incremental helpers.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/streaming"
+    },
+    {
+      "q": "During a long streamed response on Claude 4.6+, the connection drops after some text was received. What recovery approach does the documentation describe?",
+      "options": [
+        "Resend the partial text as an assistant prefill",
+        "Save the partial response and send a new request with a user message containing it plus an instruction to continue",
+        "Restart from scratch; partial recovery is impossible",
+        "Increase max_tokens and replay the same request"
+      ],
+      "answer": 1,
+      "explanation": "On 4.6+, prefill is unsupported, so the partial response goes into a user message with a continue instruction. Tool-use and thinking blocks cannot be partially recovered; resume from the last complete text block.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/streaming"
+    },
+    {
+      "q": "You pass a PDF with citations enabled. How are the citation locations expressed?",
+      "options": [
+        "`char_location` with 1-indexed characters",
+        "`page_location` with 1-indexed page numbers and an exclusive end page",
+        "`content_block_location` with 1-indexed blocks",
+        "`page_location` with 0-indexed pages and inclusive end"
+      ],
+      "answer": 1,
+      "explanation": "PDFs yield `page_location` citations: pages are 1-indexed with exclusive end. Plain text yields `char_location` (0-indexed, exclusive end), and custom content yields `content_block_location` (0-indexed, exclusive end).",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/citations"
+    },
+    {
+      "q": "A developer reads `response.content[0].text` and gets an AttributeError on some requests that use extended thinking and tools. What is the best fix?",
+      "options": [
+        "Always use `content[-1]`",
+        "Iterate over `response.content` and branch on `block.type` (text, tool_use, thinking, etc.)",
+        "Disable thinking",
+        "Wrap the access in try/except and ignore failures"
+      ],
+      "answer": 1,
+      "explanation": "`content` is an ordered array of typed blocks; thinking or tool_use blocks may come first. Switch on `type`, handle unknown types gracefully, and preserve thinking blocks unmodified for later turns.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/working-with-messages"
+    },
+    {
+      "q": "Your classifier uses a structured-output enum with values `\"High\"` and `\"high\"` and sometimes gets inconsistent routing. What explains this and what is the fix?",
+      "options": [
+        "Enums are unsupported; use free text",
+        "Claude may change the capitalization of enum values; avoid values differing only by case and compare case-insensitively",
+        "The grammar cache expired",
+        "Strict mode must be disabled"
+      ],
+      "answer": 1,
+      "explanation": "The docs note Claude may change capitalization of enum/const values without error. Design enums that differ by more than case and compare case-insensitively. Enums are supported, and cache expiry only affects latency.",
+      "source": "https://platform.claude.com/docs/en/build-with-claude/structured-outputs"
+    },
+    {
+      "q": "A team needs consistent tone, house style, and an XML report layout, with some flexibility; strict JSON is not required. Which approach matches Anthropic's consistency guidance?",
+      "options": [
+        "Specify the format, give an example of the desired output, and set the role in the system prompt",
+        "Use structured outputs for the XML",
+        "Use prefill on a current model",
+        "Fine-tune the model"
+      ],
+      "answer": 0,
+      "explanation": "Prompt-level techniques (explicit format, examples, role via system prompt, retrieval, chained prompts) fit style/XML consistency. Structured outputs target JSON schemas, and prefill is unsupported on 4.6+.",
+      "source": "https://platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/increase-consistency"
+    }
+  ]
+}
